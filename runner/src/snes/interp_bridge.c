@@ -2042,10 +2042,19 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
          * loop back in bank $00 while yield_pc is given as $80:80A1, so an exact
          * compare never matches — the interp spins the vblank wait to the step
          * cap and bails (JP boot froze here at Task0 state=3). */
+        /* A nested frame under an auto-quiescent owner (the beam-aligned
+         * driver's interp_bridge_run_until_quiescent: yield_pc 0xFFFFFFFE,
+         * no s_sched_yield_pc) is just as unable to see the interrupt as one
+         * under an explicit scheduler. A game that calls a whole sub-screen
+         * as a subroutine (Romancing SaGa 3's $C4:BF50 installs its own NMI
+         * handler and runs its own main loop before RTL) reaches its vblank
+         * waits there once its caller is compiled; without the hand-off they
+         * spun to the step cap. The unwind is the one HLE yield stubs use,
+         * which that owner already consumes and resumes. */
         const int _cooperative_poll = s_poll_gate &&
             ((yield_pc && !auto_quiescent) ||
              (!yield_pc && s_lle_sched_depth > 0 &&
-              s_sched_yield_pc && s_sched_yield_pc != 0xFFFFFFFEu &&
+              s_sched_yield_pc != 0xFFFFFFFEu &&
               s_interp_bridge_depth > 1));
         const uint8_t _poll_op =
             _cooperative_poll
