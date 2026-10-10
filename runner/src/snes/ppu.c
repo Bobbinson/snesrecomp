@@ -838,7 +838,19 @@ void ppu_runLine(Ppu* ppu, int line) {
              sizeof(ppu->overlayBuffers[kPpuOverlaySource_Obj]));
     ppu->lineHasSprites = !PPU_forcedBlank(ppu) && ppu_evaluateSprites(ppu, line - 1);
 
-    if (ppu->renderFlags & kPpuRenderFlags_NewRenderer) {
+    /* Modes 4/5/6 have no implementation in the new renderer:
+     * PpuDrawBackgrounds handles modes 0-3 and sends everything else down the
+     * mode-7 path, which reads VRAM as a mode-7 map and draws nothing useful
+     * (Romancing SaGa 3's mode-5 menus came out as sprites on black). The
+     * legacy renderer resolves them, so those lines go there. bgmode is
+     * replayed per line from the raster journal, so a field that mixes modes
+     * falls back only on the lines that need it; sprites were evaluated into
+     * the shared objBuffer above for both renderers. */
+    const unsigned line_mode = PPU_mode(ppu);
+    const int new_renderer_line =
+        (ppu->renderFlags & kPpuRenderFlags_NewRenderer) &&
+        !(line_mode >= 4 && line_mode <= 6);
+    if (new_renderer_line) {
       debug_server_on_ppu_line_drawn(line, 1, ppu->bgmode);
       PPU_T0; PpuDrawWholeLine(ppu, line); PPU_ACC(g_ppu_sec_line_ms);
 #ifdef SNESRECOMP_INTERP_PROFILE
