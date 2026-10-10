@@ -436,6 +436,11 @@ void snesrecomp_desktop_set_widescreen(int enabled) {
   WriteConfigFile(g_active_config_file);
 }
 
+void snesrecomp_desktop_display_aspect(int *aspect, int *ignore_aspect) {
+  if (aspect) *aspect = SnesDisplayAspect_Clamp(g_config.display_aspect);
+  if (ignore_aspect) *ignore_aspect = g_config.ignore_aspect_ratio ? 1 : 0;
+}
+
 /* Presentation frame blending (config.ini [Graphics] FrameBlend, the
  * launcher's Display checkbox): each presented frame averaged with the
  * previous one, so alternate-frame flicker "transparency" reads as steady

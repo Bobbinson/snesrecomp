@@ -135,6 +135,21 @@ static void ppu_render_pixel(Ppu *ppu, int x, int y) {
   pixelBuffer[1] = ((g << 3) | (g >> 2)) * PPU_brightness(ppu) / 15;
   pixelBuffer[2] = ((r << 3) | (r >> 2)) * PPU_brightness(ppu) / 15;
   pixelBuffer[3] = 0;
+  /* Hi-res surface: subscreen dot on the even column, main dot on the odd
+   * one. r2/g2/b2 hold the subscreen colour exactly when the line is hi-res. */
+  if (ppu->hires.pixels && ppu_legacy_line_is_hires(ppu)) {
+    uint8 *pair = (uint8 *)&ppu->hires.pixels[(size_t)row * ppu->hires.pitch +
+                                              (size_t)(x + ppu->extraLeftRight) * 2];
+    pair[0] = ((b2 << 3) | (b2 >> 2)) * PPU_brightness(ppu) / 15;
+    pair[1] = ((g2 << 3) | (g2 >> 2)) * PPU_brightness(ppu) / 15;
+    pair[2] = ((r2 << 3) | (r2 >> 2)) * PPU_brightness(ppu) / 15;
+    pair[3] = 0;
+    memcpy(pair + 4, pixelBuffer, 4);
+  }
+}
+
+bool ppu_legacy_line_is_hires(const Ppu *ppu) {
+  return PPU_pseudoHires(ppu) || PPU_mode(ppu) == 5 || PPU_mode(ppu) == 6;
 }
 
 static int ppu_resolve_pixel(Ppu *ppu, int x, int y, bool sub,

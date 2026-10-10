@@ -18,6 +18,13 @@ typedef struct PpuMode7HdSurface {
   unsigned width, height; /* Native dimensions, before scale. */
   unsigned scale;
 } PpuMode7HdSurface;
+/* Optional 512-column picture of the field (see PpuBindHiresSurface). */
+typedef struct PpuHiresSurface {
+  uint32_t *pixels;
+  size_t pitch;      /* In pixels; at least 2 * (256 + 2 * extraLeftRight). */
+  size_t capacity;   /* In pixels; at least pitch * 240. */
+  unsigned lines;    /* Lines of the current field drawn at full hi-res. */
+} PpuHiresSurface;
 typedef void PpuWidescreenLineEnhancer(Ppu *ppu, uint y, bool sub,
                                        void *context);
 
@@ -343,6 +350,8 @@ struct Ppu {
   uint8_t *renderBuffer;
   /* Optional additional presentation surface; never part of guest state. */
   PpuMode7HdSurface mode7Hd;
+  /* Optional 512-column presentation surface; never part of guest state. */
+  PpuHiresSurface hires;
   /* Optional host picture memory. Drawing only: CPU ports and save states
    * always use vram. The caller owns 32768 words until unbound. */
   const uint16_t *renderVram;
@@ -575,6 +584,20 @@ void ppu_runLine(Ppu* ppu, int line);
 bool PpuBindMode7HdSurface(Ppu *ppu, uint32_t *pixels, size_t capacity,
                             size_t pitch, unsigned width, unsigned height,
                             unsigned scale);
+/* Bind a surface that receives every drawn line at twice the horizontal
+ * resolution, so true hi-res output (modes 5/6 and pseudo-hires) keeps both
+ * of its 512 columns: the subscreen dot lands on the even column and the main
+ * screen dot on the odd one, as on hardware. Lines drawn by the legacy
+ * renderer in a hi-res mode are written there pixel pair by pixel pair; every
+ * other line is the normal scanout with each dot doubled. renderBuffer and the
+ * emulated state are unchanged. `pitch` and `capacity` are in pixels; NULL
+ * unbinds. Reset preserves the binding, like renderBuffer. Returns false (and
+ * leaves the binding alone) when the surface is too small for the current
+ * viewport width. */
+bool PpuBindHiresSurface(Ppu *ppu, uint32_t *pixels, size_t pitch,
+                         size_t capacity);
+/* Lines of the field being drawn (or last drawn) that used true hi-res. */
+unsigned PpuHiresLineCount(const Ppu *ppu);
 void ppu_sec_reset(void);
 void ppu_sec_read(double *eval, double *line, double *bg, double *spr,
                   double *compose, double *hdma);

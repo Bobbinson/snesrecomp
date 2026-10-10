@@ -207,6 +207,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
 int snesrecomp_desktop_frame_width(void);
 int snesrecomp_desktop_frame_height(void);
 void snesrecomp_desktop_set_widescreen(int enabled);
+/* The configured presentation aspect (a SnesDisplayAspect) and ignore-aspect
+ * setting, so a title's compute_viewport can reuse the host's viewport math
+ * for a frame whose pixels are not one SNES dot wide -- a 512-column hi-res
+ * frame is SnesDisplayAspect_ComputeViewport(frame_w / 2, ...). */
+void snesrecomp_desktop_display_aspect(int *aspect, int *ignore_aspect);
 
 /* Ask the host to reset its pacing clock at the next opportunity (a title
  * that just changed its presentation settings). */

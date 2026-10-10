@@ -212,6 +212,43 @@ bool PpuBindMode7HdSurface(Ppu *ppu, uint32_t *pixels, size_t capacity,
   return true;
 }
 
+bool PpuBindHiresSurface(Ppu *ppu, uint32_t *pixels, size_t pitch,
+                         size_t capacity) {
+  if (!ppu) return false;
+  if (!pixels) {
+    memset(&ppu->hires, 0, sizeof(ppu->hires));
+    return true;
+  }
+  const size_t width = 2u * (256u + 2u * (size_t)ppu->extraLeftRight);
+  if (pitch < width || pitch > SIZE_MAX / 240u || capacity < pitch * 240u)
+    return false;
+  ppu->hires.pixels = pixels;
+  ppu->hires.pitch = pitch;
+  ppu->hires.capacity = capacity;
+  return true;
+}
+
+unsigned PpuHiresLineCount(const Ppu *ppu) {
+  return ppu ? ppu->hires.lines : 0;
+}
+
+/* Line `line` of the hi-res surface. The legacy renderer writes true hi-res
+ * lines there itself (both dots of every pair); for every other line the
+ * normal scanout is copied with each dot doubled. */
+static void PpuWriteHiresLine(Ppu *ppu, int line, bool written_hires) {
+  if (line < 1 || line > 240) return;
+  if (written_hires) {
+    ppu->hires.lines++;
+    return;
+  }
+  const size_t width = 256u + 2u * (size_t)ppu->extraLeftRight;
+  const uint32_t *src = (const uint32_t *)
+      &ppu->renderBuffer[(size_t)(line - 1) * ppu->renderPitch];
+  uint32_t *dst = &ppu->hires.pixels[(size_t)(line - 1) * ppu->hires.pitch];
+  for (size_t i = 0; i < width; i++)
+    dst[2 * i] = dst[2 * i + 1] = src[i];
+}
+
 void PpuClearOverlayCaptures(Ppu *ppu) {
   memset(ppu->overlayCaptures, 0, sizeof(ppu->overlayCaptures));
 }
@@ -859,6 +896,11 @@ void ppu_runLine(Ppu* ppu, int line) {
     } else {
       debug_server_on_ppu_line_drawn(line, 0, ppu->bgmode);
       ppu_draw_whole_line_legacy(ppu, line);
+    }
+    if (ppu->hires.pixels) {
+      if (line == 1) ppu->hires.lines = 0;
+      PpuWriteHiresLine(ppu, line,
+                        !new_renderer_line && ppu_legacy_line_is_hires(ppu));
     }
     if (ppu->mode7Hd.pixels)
       PpuDrawMode7HdLine(ppu, (unsigned)line);
