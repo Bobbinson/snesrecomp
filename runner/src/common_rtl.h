@@ -317,6 +317,10 @@ int RtlTryWriteSram(void);
  * Pass NULL/"" to restore the default. */
 void RtlSetSaveRoot(const char *root);
 const char *RtlSaveRoot(void);
+/* Optional stable directory for the Quick slot when a host switches SRAM
+ * namespaces (e.g. course packs). NULL/"" follows the current save root.
+ * Numbered slots and battery saves retain their existing paths. */
+void RtlSetQuickSaveRoot(const char *root);
 /* Current RTLS guest prefix, including its header but excluding title extras.
  * For opt-in preflight of states written by this exact guest schema. */
 size_t RtlSnapshotGuestSize(uint32 *version_out);

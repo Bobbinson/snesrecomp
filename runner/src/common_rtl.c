@@ -2505,6 +2505,14 @@ void RtlRenderAudio(int16 *audio_buffer, int samples, int channels) {
  * game's internal title ("smw" for every title); RtlMigrateLegacySram copies
  * that forward the first time the generic name is used under the main root. */
 static char s_save_root[96] = "saves";
+static char s_quick_save_root[96];
+
+void RtlSetQuickSaveRoot(const char *root) {
+  snprintf(s_quick_save_root, sizeof(s_quick_save_root), "%s", root ? root : "");
+  size_t n = strlen(s_quick_save_root);
+  while (n > 1 && (s_quick_save_root[n - 1] == '/' || s_quick_save_root[n - 1] == '\\'))
+    s_quick_save_root[--n] = '\0';
+}
 
 void RtlSetSaveRoot(const char *root) {
   if (!root || !root[0])
@@ -2522,28 +2530,35 @@ void RtlSetSaveRoot(const char *root) {
 
 const char *RtlSaveRoot(void) { return s_save_root; }
 
-void RtlEnsureSaveDir(void) {
+static void ensure_save_root(const char *root) {
 #ifdef _WIN32
   /* Also ensure parent "saves" when root is saves/netplay */
-  if (strncmp(s_save_root, "saves/", 6) == 0 || strncmp(s_save_root, "saves\\", 6) == 0)
+  if (strncmp(root, "saves/", 6) == 0 || strncmp(root, "saves\\", 6) == 0)
     _mkdir("saves");
-  _mkdir(s_save_root);
+  _mkdir(root);
 #else
-  if (strncmp(s_save_root, "saves/", 6) == 0)
+  if (strncmp(root, "saves/", 6) == 0)
     mkdir("saves", 0755);
-  mkdir(s_save_root, 0755);
+  mkdir(root, 0755);
 #endif
+}
+
+void RtlEnsureSaveDir(void) {
+  ensure_save_root(s_save_root);
+  if (s_quick_save_root[0] && strcmp(s_quick_save_root, s_save_root))
+    ensure_save_root(s_quick_save_root);
 }
 
 void RtlSaveSlotPath(int slot, char *buf, size_t buflen) {
   const char *prefix = g_rtl_game_info ? g_rtl_game_info->save_name_prefix : NULL;
   if (slot == SNES_SAVESTATE_QUICK_SLOT) {
+    const char *root = s_quick_save_root[0] ? s_quick_save_root : s_save_root;
     if (prefix)
-      snprintf(buf, buflen, "%s/%squick.sav", s_save_root, prefix);
+      snprintf(buf, buflen, "%s/%squick.sav", root, prefix);
     else if (g_rtl_game_info && g_rtl_game_info->title)
-      snprintf(buf, buflen, "%s/%s_quick.sav", s_save_root, g_rtl_game_info->title);
+      snprintf(buf, buflen, "%s/%s_quick.sav", root, g_rtl_game_info->title);
     else
-      snprintf(buf, buflen, "%s/quick.sav", s_save_root);
+      snprintf(buf, buflen, "%s/quick.sav", root);
     return;
   }
   if (prefix)
