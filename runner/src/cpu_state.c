@@ -421,7 +421,17 @@ static uint16 cpu_latch_read16(CpuState *cpu, uint16 value) {
     return value;
 }
 
+#ifdef SNESRECOMP_READ_HOOK
+/* Dev-only data-read hook (port-provided), compiled in only with
+ * -DSNESRECOMP_READ_HOOK: lets a port trace which code reads which data. */
+extern void snesrecomp_read_hook(uint8 bank, uint16 addr, int width);
+#define READ_HOOK(b, a, w) snesrecomp_read_hook((b), (a), (w))
+#else
+#define READ_HOOK(b, a, w) ((void)0)
+#endif
+
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
+    READ_HOOK(bank, addr, 1);
     if (g_snes && g_snes->cart)
         cart_note_cpu_bus(g_snes->cart, bank, addr);
     int off = cpu_wram_offset(bank, addr);
@@ -456,6 +466,7 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
 }
 
 uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
+    READ_HOOK(bank, addr, 2);
     if (g_snes && g_snes->cart)
         cart_note_cpu_bus(g_snes->cart, bank, addr);
     int off = cpu_wram_offset(bank, addr);
