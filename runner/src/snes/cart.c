@@ -174,6 +174,14 @@ uint8_t *cart_getRomPtr(Cart *cart, uint8_t bank, uint16_t adr) {
     case CART_HIROM: {
       uint8_t canonical = bank & 0x7f;
       if (adr < 0x8000 && canonical < 0x40) return NULL;
+      /* Host-extended image (a port grows the ROM past 4 MiB, e.g. for
+       * relocated translated text): banks $40-$4F, whose plain HiROM view
+       * only mirrors $C0-$CF, map to the bytes beyond 4 MiB instead. A
+       * 4 MiB-or-smaller image keeps the hardware mapping unchanged. */
+      if (bank >= 0x40 && bank < 0x50 && cart->romSize > 0x400000) {
+        off = 0x400000u + (((uint32_t)(bank - 0x40) << 16) | adr);
+        break;
+      }
       off = ((uint32_t)(canonical & 0x3f) << 16) | adr;
       break;
     }
