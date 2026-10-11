@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "save_state_slots.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,10 +42,8 @@ extern "C" {
  * wire the overlay up and forget the part that does the work.
  */
 
-#define SNES_SAVESTATE_SLOTS 12
-
-/* Panel dimensions. 2x the SNES frame, so it overlays the game texture with
- * the same destination rect and needs no aspect correction of its own. */
+/* Raster dimensions. Present at a centered 4:3 display aspect, independent
+ * of the game's widescreen setting. */
 #define SNES_SSM_W 512
 #define SNES_SSM_H 448
 
@@ -77,6 +76,14 @@ void snes_savestate_menu_close(void);
  * (one downsample to 128x112); ignored while the menu is open, so the
  * thumbnail is of the game and not of the overlay. */
 void snes_savestate_menu_note_frame(const uint32_t *fb, int w, int h);
+
+/* A successful host save updates the same thumbnail/browser entry as a save
+ * made in this menu. Accepts numbered slots and SNES_SAVESTATE_QUICK_SLOT. */
+void snes_savestate_menu_note_slot_saved(int slot);
+
+/* Center a 4:3 panel in physical display pixels. */
+void snes_savestate_menu_viewport(int width, int height,
+                                 int *x, int *y, int *w, int *h);
 
 /* Optional: the picture the player actually sees, when a title composes its
  * own (e.g. a co-op renderer that draws the second player over the PPU

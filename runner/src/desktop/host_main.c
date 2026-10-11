@@ -1844,8 +1844,9 @@ static void PresentFrozenWithOverlay(void) {
 
   if (panel) {
     if (is_menu) {
-      snes_ovl_blit_panel_rect(pixel_buffer, pitch, draw_w, draw_h,
-                               panel, pw, ph, 0, 0, draw_w, draw_h);
+      /* EndDraw applies SNES pixel-aspect correction to this buffer. Keep
+       * the menu's stock proportions before that presentation step. */
+      snes_ovl_blit_panel(pixel_buffer, pitch, draw_w, draw_h, panel, pw, ph);
     } else {
       /* Full width, anchored to the bottom, at the strip's own height when
        * it fits (1:1 on the stock field, so its text stays crisp), else

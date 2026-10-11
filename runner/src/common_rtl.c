@@ -4,6 +4,7 @@
 #include <unistd.h>
 #endif
 #include "common_rtl.h"
+#include "save_state_slots.h"
 #include "apu_frame_clock.h"
 #include "common_cpu_infra.h"
 #include "snes/interp_bridge.h"
@@ -2536,6 +2537,15 @@ void RtlEnsureSaveDir(void) {
 
 void RtlSaveSlotPath(int slot, char *buf, size_t buflen) {
   const char *prefix = g_rtl_game_info ? g_rtl_game_info->save_name_prefix : NULL;
+  if (slot == SNES_SAVESTATE_QUICK_SLOT) {
+    if (prefix)
+      snprintf(buf, buflen, "%s/%squick.sav", s_save_root, prefix);
+    else if (g_rtl_game_info && g_rtl_game_info->title)
+      snprintf(buf, buflen, "%s/%s_quick.sav", s_save_root, g_rtl_game_info->title);
+    else
+      snprintf(buf, buflen, "%s/quick.sav", s_save_root);
+    return;
+  }
   if (prefix)
     snprintf(buf, buflen, "%s/%s%d.sav", s_save_root, prefix, slot);
   else if (g_rtl_game_info && g_rtl_game_info->title)

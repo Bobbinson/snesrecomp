@@ -6,9 +6,8 @@
  *
  * Software-rasterized into a plain ARGB buffer, with no dependency on SDL or
  * on any renderer: the host asks for the image and blits it however it draws
- * anything else. The panel is 2x the SNES frame, so a host that presents it
- * with the same destination rect as the game texture gets correct geometry
- * for free.
+ * anything else. The raster is 2x the SNES frame; hosts present it at a
+ * centered 4:3 display aspect, independent of widescreen gameplay.
  *
  * Thumbnails are a sidecar file next to the slot ("<slot>.sav.thumb"), not a
  * chunk inside the savestate. The RTLS blob is versioned and shared with
@@ -45,7 +44,7 @@
 
 #define SSM_W SNES_SSM_W
 #define SSM_H SNES_SSM_H
-#define SSM_SLOTS SNES_SAVESTATE_SLOTS
+#define SSM_SLOTS (SNES_SAVESTATE_SLOTS + 1)
 
 #define SSM_THUMB_W 128
 #define SSM_THUMB_H 112
@@ -96,9 +95,7 @@ static int s_have_live_thumb;
 static SnesSavestateComposeFn s_compose;
 static void sample_thumb(const uint32_t *fb, int w, int h);
 
-/* Footer status line — this port's substitute for psxrecomp's host_osd_push.
- * The SNES hosts have no OSD layer, and adding one to carry three strings
- * would be a subsystem where a line of text will do. */
+/* Footer feedback remains visible while the browser is open. */
 static char s_status[48];
 
 /* Held-direction state for auto-repeat. */
@@ -112,6 +109,12 @@ static int s_repeat_dir;
  * frame, and Select+R held through a close re-opens the menu immediately.
  * psxrecomp calls the same idea savestate_input_guard_arm(). */
 static uint32_t s_input_guard;
+
+/* Numbered slots keep their network protocol indices. Quick saves are local. */
+static int slot_count(void)
+{
+    return snes_netplay_active() ? SNES_SAVESTATE_SLOTS : SSM_SLOTS;
+}
 
 /* ── Rasterizer primitives ─────────────────────────────────────────────── */
 
@@ -287,10 +290,10 @@ static void rasterize_panel(void)
 
     first = s_selected - 1;
     if (first < 0) first = 0;
-    if (first > SSM_SLOTS - SSM_VISIBLE_ROWS)
-        first = SSM_SLOTS - SSM_VISIBLE_ROWS;
+    if (first > slot_count() - SSM_VISIBLE_ROWS)
+        first = slot_count() - SSM_VISIBLE_ROWS;
     snprintf(buf, sizeof(buf), "%02d-%02d / %02d",
-             first + 1, first + SSM_VISIBLE_ROWS, SSM_SLOTS);
+             first + 1, first + SSM_VISIBLE_ROWS, slot_count());
     draw_text(s_panel, 20, 42, buf, 0xFF7F8796u, 1);
 
     for (i = first; i < first + SSM_VISIBLE_ROWS; i++) {
@@ -305,7 +308,8 @@ static void rasterize_panel(void)
         stroke_rect(s_panel, SSM_ROWS_X, y, SSM_ROWS_W, SSM_ROW_H,
                     sel ? 0xFFFFD24Du : 0xFF303746u);
 
-        snprintf(buf, sizeof(buf), "SLOT %02d", i + 1);
+        if (i == SNES_SAVESTATE_QUICK_SLOT) snprintf(buf, sizeof(buf), "QUICK");
+        else snprintf(buf, sizeof(buf), "SLOT %02d", i + 1);
         draw_text(s_panel, SSM_ROWS_X + 12, y + 14, buf, fg, 1);
 
         if (s_have_thumb[i]) {
@@ -345,7 +349,7 @@ static void rasterize_panel(void)
     if (s_mirror)
         draw_text(s_panel, 20, 422, "NETPLAY: THE HOST CONTROLS THIS MENU", 0xFFB8BDC8u, 1);
     else
-        draw_text(s_panel, 20, 422, "KEYS: ARROWS SLOT  X LOAD  S SAVE  ESC BACK  1-9 JUMP",
+        draw_text(s_panel, 20, 422, "KEYS: ARROWS SLOT  X LOAD  S SAVE  ESC BACK  Q QUICK",
                   0xFFB8BDC8u, 1);
     if (s_status[0])
         draw_text(s_panel, 20, 436, s_status, 0xFFFFD24Du, 1);
@@ -361,13 +365,23 @@ static void set_status(const char *fmt, int slot)
     s_dirty = 1;
 }
 
+static void set_local_status(const char *fmt, const char *quick)
+{
+    if (s_selected != SNES_SAVESTATE_QUICK_SLOT) {
+        set_status(fmt, s_selected);
+        return;
+    }
+    snprintf(s_status, sizeof(s_status), "%s", quick);
+    s_dirty = 1;
+}
+
 static void menu_move(int delta)
 {
     s_selected += delta;
     while (s_selected < 0)
-        s_selected += SSM_SLOTS;
-    while (s_selected >= SSM_SLOTS)
-        s_selected -= SSM_SLOTS;
+        s_selected += slot_count();
+    while (s_selected >= slot_count())
+        s_selected -= slot_count();
     s_status[0] = '\0';
     s_dirty = 1;
     snes_netplay_menu_cursor(s_selected); /* every peer shows the host's cursor */
@@ -396,9 +410,7 @@ static int write_slot(int slot)
             cw > 0 && ch > 0 && (size_t)cw * (size_t)ch <= sizeof(composed) / sizeof(composed[0]))
             sample_thumb(composed, cw, ch);
     }
-    if (s_have_live_thumb)
-        write_thumb(slot, s_live_thumb);
-    refresh_thumbs();
+    snes_savestate_menu_note_slot_saved(slot);
     return 1;
 }
 
@@ -423,33 +435,36 @@ static void menu_submit(int save)
     slot_path(s_selected, path, sizeof(path));
     if (save) {
         if (!write_slot(s_selected)) {
-            set_status("SAVE FAILED: SLOT %02d", s_selected);
+            set_local_status("SAVE FAILED: SLOT %02d", "QUICK SAVE FAILED");
             return;
         }
         /* Deliberately stays open after a save, where psxrecomp closes.
          * The freshly written thumbnail appearing in the row is the only
          * direct evidence a player gets that the state was actually
          * written, and this port had no save-state UI at all before now. */
-        set_status("SAVED SLOT %02d", s_selected);
+        set_local_status("SAVED SLOT %02d", "QUICK STATE SAVED");
         /* Also a host toast: the in-menu status above is only visible while
          * the menu is, and a player who saves and immediately closes would
          * otherwise get no confirmation that anything was written. */
-        snes_osd_push_slot_saved(s_selected);
+        if (s_selected == SNES_SAVESTATE_QUICK_SLOT) snes_osd_push("Quick state saved", 0);
+        else snes_osd_push_slot_saved(s_selected);
         return;
     }
     if (!slot_exists(s_selected)) {
-        set_status("SLOT %02d IS EMPTY", s_selected);
-        snes_osd_push_slot_empty(s_selected);
+        set_local_status("SLOT %02d IS EMPTY", "QUICK SLOT IS EMPTY");
+        if (s_selected == SNES_SAVESTATE_QUICK_SLOT) snes_osd_push("Quick slot is empty", 0);
+        else snes_osd_push_slot_empty(s_selected);
         return;
     }
     if (!RtlLoadSnapshot(path)) {
-        set_status("LOAD FAILED: SLOT %02d", s_selected);
+        set_local_status("LOAD FAILED: SLOT %02d", "QUICK LOAD FAILED");
         return;
     }
     /* A load CLOSES the menu, so set_status() here would draw one frame of a
      * panel that is already gone. The toast outlives the menu, which is why
      * the load path needs it more than the save path does. */
-    snes_osd_push_slot_loaded(s_selected);
+    if (s_selected == SNES_SAVESTATE_QUICK_SLOT) snes_osd_push("Quick state loaded", 0);
+    else snes_osd_push_slot_loaded(s_selected);
     snes_savestate_menu_close();
 }
 
@@ -488,6 +503,7 @@ void snes_savestate_menu_close(void)
 
 void snes_savestate_menu_netplay_show(void)
 {
+    if (s_selected == SNES_SAVESTATE_QUICK_SLOT) s_selected = 0;
     if (!s_open) {
         s_open = 1;
         s_repeat_dir = 0;
@@ -508,7 +524,7 @@ void snes_savestate_menu_netplay_hide(void)
 
 void snes_savestate_menu_netplay_cursor(int slot)
 {
-    if (slot < 0 || slot >= SSM_SLOTS)
+    if (slot < 0 || slot >= SNES_SAVESTATE_SLOTS)
         return;
     s_selected = slot;
     s_status[0] = '\0';
@@ -523,7 +539,7 @@ void snes_savestate_menu_netplay_status(const char *fmt, int slot)
 
 int snes_savestate_menu_netplay_write_slot(int slot)
 {
-    if (slot < 0 || slot >= SSM_SLOTS)
+    if (slot < 0 || slot >= SNES_SAVESTATE_SLOTS)
         return 0;
     return write_slot(slot);
 }
@@ -549,6 +565,7 @@ int snes_savestate_menu_poll_open(uint32_t inputs)
     if ((prev & SSM_OPEN_GESTURE) == SSM_OPEN_GESTURE)
         return 0;
     if (snes_netplay_active() && !snes_netplay_menu_open()) return 0;
+    if (snes_netplay_active() && s_selected == SNES_SAVESTATE_QUICK_SLOT) s_selected = 0;
     s_open = 1;
     s_mirror = 0;
     s_status[0] = '\0';
@@ -647,7 +664,9 @@ void snes_savestate_menu_handle_key(int key, int repeat)
         slot = 10;
     else if (key == (int)SDLK_EQUALS)
         slot = 11;
-    if (slot < 0 || slot >= SSM_SLOTS)
+    if (key == (int)SDLK_q && !snes_netplay_active())
+        slot = SNES_SAVESTATE_QUICK_SLOT;
+    if (slot < 0 || slot >= slot_count())
         return;
     s_selected = slot;
     s_status[0] = '\0';
@@ -680,6 +699,27 @@ static void sample_thumb(const uint32_t *fb, int w, int h)
             out[x] = row[x * w / SSM_THUMB_W] | 0xFF000000u;
     }
     s_have_live_thumb = 1;
+}
+
+void snes_savestate_menu_note_slot_saved(int slot)
+{
+    if (slot < 0 || slot >= SSM_SLOTS) return;
+    if (s_have_live_thumb) write_thumb(slot, s_live_thumb);
+    refresh_thumbs();
+    s_dirty = 1;
+}
+
+void snes_savestate_menu_viewport(int width, int height,
+                                 int *x, int *y, int *w, int *h)
+{
+    int rw = width > 0 && height > 0 ? width : 0;
+    int rh = rw ? height : 0;
+    if ((int64_t)rw * 3 > (int64_t)rh * 4) rw = (int)((int64_t)rh * 4 / 3);
+    else rh = (int)((int64_t)rw * 3 / 4);
+    if (x) *x = rw ? (width - rw) / 2 : 0;
+    if (y) *y = rh ? (height - rh) / 2 : 0;
+    if (w) *w = rw;
+    if (h) *h = rh;
 }
 
 int snes_savestate_menu_overlay_image(const uint32_t **pixels, int *w, int *h)
