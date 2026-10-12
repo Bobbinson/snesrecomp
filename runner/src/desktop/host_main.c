@@ -4196,7 +4196,13 @@ error_reading:;
       host_report_breadcrumb("first frame simulated");
     else if (frameCtr % 3600 == 0)   /* ~once a minute at 60 fps */
       host_report_breadcrumb("heartbeat: frame=%u", frameCtr);
-    g_snes->disableRender = g_turbo && (frameCtr & 0xf) != 0;
+    /* SNESRECOMP_TURBO_RENDER: rasterise every frame under turbo too, so a TCP
+     * screenshot after a stepped turbo run shows the last frame; presenting
+     * keeps the 1-in-16 cadence (each present waits for vsync). */
+    static int turbo_render = -1;
+    if (turbo_render < 0) turbo_render = getenv("SNESRECOMP_TURBO_RENDER") != NULL;
+    const bool skip_present = g_turbo && (frameCtr & 0xf) != 0;
+    g_snes->disableRender = skip_present && !turbo_render;
     snes_osd_set_turbo(g_turbo);
 
     profile_start = ProfileStart();
@@ -4222,7 +4228,7 @@ error_reading:;
     }
     else
       snes_host_clock_reset(&video_clock, MonotonicSeconds(), g_simulation_hz, presentation_hz);
-    if (!g_snes->disableRender &&
+    if (!skip_present &&
         (!paced_custom || snes_host_clock_presentation_due(&video_clock, MonotonicSeconds()) ||
          (run_frames && frameCtr >= run_frames))) {
       double presented_at = MonotonicSeconds();
