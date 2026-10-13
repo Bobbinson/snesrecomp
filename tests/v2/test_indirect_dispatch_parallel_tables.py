@@ -140,7 +140,7 @@ def test_absolute_indirect_dispatch_switches_on_loaded_pointer():
     )
 
     assert 'absolute indirect dispatch: switch on the loaded pointer' in src
-    assert 'uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x000e)' in src
+    assert 'uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x000e)' in src
     assert 'switch (_target)' in src
     assert 'case 0x9000:' in src
     assert 'case 0x9100:' in src
@@ -178,4 +178,42 @@ def test_absolute_indirect_long_dispatch_reads_24bit_pointer():
     assert 'uint8 _target_bank = cpu_read8(cpu, 0x00, (uint16)(0x0012 + 2));' in src
     assert 'uint32 _target = ((uint32)_target_bank << 16) | (uint32)_target_lo;' in src
     assert 'case 0x019000:' in src
-    assert 'uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x0012)' not in src
+    assert 'uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x0012)' not in src
+
+
+def test_absolute_indirect_pointer_is_read_in_bank_zero():
+    """`JMP (abs)` reads its pointer in bank $00 whatever the program bank.
+
+    Only `JMP/JSR (abs,X)` index into PB. Reading PB happens to work for
+    LoROM WRAM mirrors ($80-$BF:0000-1FFF), but not for a pointer in ROM or
+    for HiROM code banks, where PB:$0000-$7FFF is ROM: the switch would then
+    key on constant ROM bytes instead of the live RAM pointer.
+    """
+    rom = make_lorom_bank0({
+        0x8000: bytes([
+            0xC2, 0x30,        # REP #$30
+            0x6C, 0x0E, 0x00,  # JMP ($000e)
+        ]),
+        0x9000: bytes([0x60]),  # RTS
+    })
+
+    src = emit_function(
+        rom=rom,
+        bank=0x80,
+        start=0x8000,
+        entry_m=1,
+        entry_x=1,
+        func_name='AbsoluteIndirectInBank80',
+        indirect_dispatch={
+            0x808002: {
+                'count': 1,
+                'idx_reg': 'X',
+                'table_bases': (),
+                'pointer_match': True,
+                'targets': (0x9000,),
+            },
+        },
+    )
+
+    assert 'uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x000e)' in src
+    assert 'cpu_read16(cpu, cpu->PB, (uint16)0x000e)' not in src

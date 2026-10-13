@@ -1532,9 +1532,12 @@ def _emit_indirect_dispatch(insn) -> List[str]:
                 f"(uint16)(cpu->D + 0x{ptr:04x})) + 1u);"
                 "  /* PEI(dp); RTS consumes target-1 as an internal goto */")
         else:
+            # JMP (abs) reads its pointer in bank $00, not in the program bank
+            # (only JMP/JSR (abs,X) index into PB). The two coincide in LoROM
+            # WRAM mirrors, not in HiROM banks $C0-$FF where $0000-$7FFF is ROM.
             lines.append(
-                f"  uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x{ptr:04x});"
-                "  /* absolute indirect dispatch: switch on the loaded pointer */")
+                f"  uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x{ptr:04x});"
+                "  /* absolute indirect dispatch: switch on the loaded pointer (bank $00) */")
         lines.append("  switch (_target) {")
         seen_cases = set()
         hle_tail_entries = frozenset(
@@ -1630,9 +1633,11 @@ def _emit_indirect_dispatch(insn) -> List[str]:
                 "  uint16 _target = cpu_read16(cpu, cpu->PB, _ptr);"
                 "  /* switch on the loaded pointer */")
         else:
+            # JMP (abs) (and the PEA+JMP (ptr) call idiom) reads its pointer in
+            # bank $00, not in PB: see the local computed-goto case above.
             lines.append(
-                f"  uint16 _target = cpu_read16(cpu, cpu->PB, (uint16)0x{ptr:04x});"
-                "  /* absolute indirect dispatch: switch on the loaded pointer */"
+                f"  uint16 _target = cpu_read16(cpu, 0x00, (uint16)0x{ptr:04x});"
+                "  /* absolute indirect dispatch: switch on the loaded pointer (bank $00) */"
             )
         if is_rts_stack_dispatch:
             lines.append("  {")
