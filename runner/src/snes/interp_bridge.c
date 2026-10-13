@@ -560,6 +560,10 @@ unsigned long long g_interp_bridge_steps = 0;
  * separately and join them by key instead. */
 void (*g_interp_bridge_pc_hook)(uint32_t pc24, int m_flag, int x_flag) = 0;
 void (*g_interp_bridge_bounce_hook)(uint32_t pc24, int m_flag, int x_flag) = 0;
+/* Diagnostic cycle scale (Q8, 256 = identity) applied to what each
+ * interpreted opcode charges to cpu->cycles / cpu->master_cycles. See
+ * interp_bridge.h. */
+uint32_t g_interp_cycle_scale_q8 = 256u;
 /* Architectural stack boundary of the currently active interpreter frame.
  * A rewritten AOT return that has already popped above this boundary belongs
  * to a compiled ancestor, not to this interpreter's guest call chain. */
@@ -2500,8 +2504,13 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             unsigned _internal = (unsigned)_cyc > s_interp_bus_cycles
                                ? (unsigned)_cyc - s_interp_bus_cycles : 0;
             uint64_t _master = s_interp_bus_master + (uint64_t)_internal * 6u;
+            uint64_t _charged = (uint64_t)_cyc;
+            if (g_interp_cycle_scale_q8 != 256u) {
+                _master = (_master * g_interp_cycle_scale_q8) >> 8;
+                _charged = (_charged * g_interp_cycle_scale_q8) >> 8;
+            }
             g_interp_bridge_steps++;
-            cpu->cycles        += (uint64_t)_cyc;
+            cpu->cycles        += _charged;
             cpu->master_cycles += _master;
             /* DRAM refresh tax — shared watermark with the AOT tier's
              * WatchdogCheck charge; see common_cpu_infra.c. */

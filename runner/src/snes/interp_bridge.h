@@ -284,6 +284,15 @@ int interp_bridge_resume_task(CpuState *cpu, uint32_t resume_pc24,
 extern void (*g_interp_bridge_pc_hook)(uint32_t pc24, int m_flag, int x_flag);
 extern void (*g_interp_bridge_bounce_hook)(uint32_t pc24, int m_flag, int x_flag);
 
+/* Diagnostic cycle scale, Q8 (256 = identity, the default). Every interpreted
+ * opcode charges (cycles * scale) >> 8 to cpu->cycles and cpu->master_cycles,
+ * so the beam, the frame deadline and the APU see the scaled time. A port sets
+ * it around one interpreted call to model a host replacement that does the
+ * same work at another cost (0: a C helper that charges nothing for its own
+ * instructions; compiled bodies it bounces into still charge theirs). Never
+ * changed by the framework itself. */
+extern uint32_t g_interp_cycle_scale_q8;
+
 long interp_tier_hit_count(void);
 void interp_tier2_stats(int *sites, unsigned long long *clean,
                         unsigned long long *bail);
