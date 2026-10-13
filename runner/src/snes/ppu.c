@@ -23,6 +23,11 @@ extern unsigned char g_snesrecomp_last_hdmaen;
 extern Snes *g_snes;
 extern unsigned char g_snesrecomp_last_hdmaen;
 
+#ifdef SNES_COSIM
+/* Co-sim virtual beam latch for SLHV ($2137), off by default; see ppu.h. */
+int g_cosim_virtual_hv = 0;
+#endif
+
 #ifdef SNESRECOMP_INTERP_PROFILE
 static double g_ppu_sec_eval_ms = 0;
 static double g_ppu_sec_line_ms = 0;
@@ -3064,6 +3069,20 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
        * games waiting for any other line loop forever. */
       ppu->hCount = g_snes->hPos / 4;
       ppu->vCount = g_snes->vPos;
+#ifdef SNES_COSIM
+      /* Co-sim virtual beam latch (g_cosim_virtual_hv, dev-only): the live
+       * beam is a per-side clock -- compiled and interpreted code charge
+       * different cycles for the same instructions -- so a game seeding its
+       * RNG from OPHCT (Romancing SaGa 3 at $C0:01A7) gets a different seed
+       * on each side. The HW-touch count is the clock both sides advance
+       * identically (same guest instructions => same touches). */
+      if (g_cosim_virtual_hv) {
+        extern uint64_t g_main_cpu_cycles_estimate;
+        uint64_t t = g_main_cpu_cycles_estimate >> 8;
+        ppu->hCount = (uint16_t)((t * 13u) % 340u);
+        ppu->vCount = (uint16_t)((t / 340u) % 262u);
+      }
+#endif
       ppu->hCountSecond = false;
       ppu->vCountSecond = false;
       ppu->countersLatched = true;

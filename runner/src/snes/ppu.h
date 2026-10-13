@@ -603,6 +603,14 @@ void ppu_sec_read(double *eval, double *line, double *bg, double *spr,
                   double *compose, double *hdma);
 uint8_t ppu_read(Ppu* ppu, uint8_t adr);
 void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val);
+#ifdef SNES_COSIM
+/* Co-sim only (default 0): when set, SLHV ($2137) latches H/V counters derived
+ * from the HW-touch count instead of the live beam, so a same-binary A/B pair
+ * whose execution models charge different cycles still reads identical
+ * counters at the same guest instruction (beam-seeded RNGs). Both sides must
+ * set the same value before the first frame. */
+extern int g_cosim_virtual_hv;
+#endif
 /* Notified on every CPU write to VRAM through $2118/$2119, with the BYTE
  * address written and the value. Mirrors snes_set_wram_write_log_hook():
  * a host can name the instruction responsible, which the AOT-side
