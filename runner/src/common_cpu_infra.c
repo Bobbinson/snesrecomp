@@ -596,7 +596,13 @@ void RecompStackPushInterpreter(const char *name) {
     g_cpu_entry_s_valid[slot] = 0;
 }
 
+/* Optional host observer of every function entry; NULL by default. See
+ * common_cpu_infra.h. */
+void (*g_recomp_stack_push_hook)(const char *name);
+
 void RecompStackPush(const char *name) {
+  if (g_recomp_stack_push_hook)
+    g_recomp_stack_push_hook(name);
 #ifdef SNESRECOMP_INTERP_PROFILE
   if (g_aotprof_on < 0) aotprof_latch_env();
   if (g_aotprof_on == 1) {

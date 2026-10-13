@@ -1,6 +1,8 @@
 #ifndef SNESRECOMP_BEAM_FRAME_DRIVER_H
 #define SNESRECOMP_BEAM_FRAME_DRIVER_H
 
+#include <stdint.h>
+
 /* Beam-aligned frame driver for whole-program LLE ports.
  *
  * One host frame is one PPU field, cut where hardware raises NMI: the beam's
@@ -28,5 +30,24 @@ void snes_beam_frame_driver_draw_ppu_frame_observed(
     SnesBeamRasterObserver *observer, void *context);
 /* Forget the booted machine: the next frame starts from the reset vector. */
 void snes_beam_frame_driver_reset(void);
+
+/* The driver's own execution position, for save states.
+ *
+ * A guest snapshot (snes_saveload) holds the machine, not where the driver
+ * resumes it: the PC the next slice re-enters the guest at (0 = not booted,
+ * which makes the next frame start from the reset vector) and the WAI halt
+ * latch. Both are host statics, so a state loaded into a fresh process --
+ * where the PC is still 0 -- rebooted the game on top of the restored RAM,
+ * and one loaded into a running process resumed at whatever PC that process
+ * had parked on. A title that saves states writes this next to the guest
+ * blob (state_save_extra, with RtlSaveExecutionState for g_cpu and the
+ * bridge) and puts it back in on_state_loaded. Plain data, no pointers. */
+typedef struct SnesBeamFrameDriverState {
+  uint32_t resume_pc;  /* 24-bit PC; 0 = boot from the reset vector */
+  uint8_t wai_halted;
+  uint8_t pad[3];
+} SnesBeamFrameDriverState;
+void snes_beam_frame_driver_get_state(SnesBeamFrameDriverState *out);
+void snes_beam_frame_driver_set_state(const SnesBeamFrameDriverState *in);
 
 #endif /* SNESRECOMP_BEAM_FRAME_DRIVER_H */

@@ -269,3 +269,18 @@ void snes_beam_frame_driver_reset(void) {
   s_resume_pc = 0;
   s_wai_halted = false;
 }
+
+void snes_beam_frame_driver_get_state(SnesBeamFrameDriverState *out) {
+  if (!out)
+    return;
+  *out = (SnesBeamFrameDriverState){0};
+  out->resume_pc = s_resume_pc & 0xFFFFFFu;
+  out->wai_halted = s_wai_halted ? 1u : 0u;
+}
+
+void snes_beam_frame_driver_set_state(const SnesBeamFrameDriverState *in) {
+  if (!in)
+    return;
+  s_resume_pc = in->resume_pc & 0xFFFFFFu;
+  s_wai_halted = in->wai_halted != 0;
+}

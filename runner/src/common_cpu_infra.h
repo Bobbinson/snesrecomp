@@ -60,6 +60,13 @@ void RecompStackPush(const char *name);
 /* Attribution only: an interpreter run is not a compiled guest caller and
  * cannot be selected as a SKIP_N return target. */
 void RecompStackPushInterpreter(const char *name);
+/* Optional host observer, NULL by default (one predictable branch): called at
+ * the top of every RecompStackPush, i.e. once per compiled body entered (the
+ * generated prologue's name, an interned literal such as "sub_C0017C_M1X0")
+ * and once per interpreter run (RecompStackPushInterpreter's
+ * "interp@$XXXXXX" scope, XXXXXX = the run's entry PC). For coverage and
+ * profiling tools: it must not touch guest state. */
+extern void (*g_recomp_stack_push_hook)(const char *name);
 void RecompStackPop(void);
 /* Pop for an LLE yield unwind: the frame is unfinished, so no balance figure
  * is recorded. See common_cpu_infra.c. */
