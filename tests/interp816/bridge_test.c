@@ -431,6 +431,36 @@ static int resume_ring_has(uint64_t since, int site, int kind) {
 }
 static void observe_dest(CpuState *cpu,uint32_t pc) {(void)cpu;(void)pc;++hook_dest;}
 
+/* S18: host continuation hooks. One callback, five behaviours. */
+static int g_host_mode, g_host_calls;
+static int host_hook(CpuState *cpu, uint32_t pc, RecompReturn *r,
+                     uint32_t *next) {
+    (void)pc;
+    g_host_calls++;
+    switch (g_host_mode) {
+    case 1:                       /* claim, continue elsewhere */
+        cpu->X = 0x99;
+        *next = 0x008010;
+        return 1;
+    case 2:                       /* arm an unwind this frame owns */
+        *r = interp_bridge_lle_yield_unwind(cpu, 0x008010);
+        return 1;
+    case 3:                       /* the frame deadline fires inside the hook */
+        cpu->master_cycles = 200;
+        if (interp_bridge_lle_master_deadline_reached(cpu)) {
+            *r = interp_bridge_lle_yield_unwind(cpu, 0x008002);
+            return 1;
+        }
+        *next = 0x008010;
+        return 1;
+    case 4:                       /* a SKIP has no host caller here */
+        *r = RECOMP_RETURN_SKIP_1;
+        return 1;
+    default:                      /* not claimed */
+        return 0;
+    }
+}
+
 int main(void) {
     const char *journal = "tier2_bridge_test.jsonl";
     remove(journal);
@@ -1337,6 +1367,64 @@ int main(void) {
               "rc=%d visits=%u resume=$%06X exp 10 visits then scheduler wait",
               rc, g_poll_visits, (unsigned)interp_bridge_lle_resume_pc());
       }
+    }
+    /* S18: host continuation hooks.
+     *   $8000 LDA #$01 / $8002 NOP (hook) / $8003 RTS
+     *   $8010 LDA #$42 / RTS */
+    for (int mode = 0; mode < 2; mode++) {
+      memset(RAM, 0, MEMSZ); init_cpu(); g_host_calls = 0; g_host_mode = mode;
+      uint8_t c[] = {0xA9,0x01, 0xEA, 0x60};
+      uint8_t d[] = {0xA9,0x42, 0x60};
+      load(0x8000, c, sizeof c); load(0x8010, d, sizeof d);
+      cpu_push_jsr_return_frame(&g_c);
+      CHECK(interp_bridge_add_host_hook(0x008002, host_hook), "host hook registered");
+      CHECK(interp_bridge_add_host_hook(0x808002, host_hook), "mirrored PC idempotent");
+      int rc = interp_bridge_run(&g_c, 0x008000);
+      interp_bridge_clear_host_hooks();
+      printf("S18%c host hook %s\n", 'a' + mode,
+             mode ? "claims and continues at its PC" : "declines: opcode runs");
+      CHECK(rc == 1 && g_c.S == 0x01FF && g_host_calls == 1,
+            "rc=%d S=%04X calls=%d", rc, g_c.S, g_host_calls);
+      CHECK((g_c.A & 0xFF) == (mode ? 0x42 : 0x01) && g_c.X == (mode ? 0x99 : 0),
+            "A=%04X X=%04X", g_c.A, g_c.X);
+    }
+    /* Scheduler frame: $8000 NOP (hook) / $8001 LDA #$11 / $8003 wait loop;
+     * $8010 LDA #$33 / JMP $8003. */
+    for (int mode = 2; mode < 4; mode++) {
+      memset(RAM, 0, MEMSZ); init_cpu(); g_host_calls = 0; g_host_mode = mode;
+      uint8_t c[] = {0xEA, 0xA9,0x11, 0xAD,0x20,0x00, 0xD0,0xFB};
+      uint8_t d[] = {0xA9,0x33, 0x4C,0x03,0x80};
+      load(0x8000, c, sizeof c); load(0x8010, d, sizeof d);
+      RAM[0x20] = 0;
+      if (mode == 3) interp_bridge_set_master_deadline(100);
+      interp_bridge_add_host_hook(0x008000, host_hook);
+      int rc = interp_bridge_run_loop(&g_c, 0x008000, 0x008003, 0x0020, 0);
+      interp_bridge_clear_host_hooks();
+      interp_bridge_set_master_deadline(0);
+      printf("S18%c host hook %s\n", 'a' + mode,
+             mode == 2 ? "unwind is consumed by its own frame"
+                       : "deadline inside the hook returns to the host");
+      CHECK(rc == 1 && g_host_calls == 1 && !interp_bridge_lle_unwind_pending(),
+            "rc=%d calls=%d pending=%d", rc, g_host_calls,
+            interp_bridge_lle_unwind_pending());
+      if (mode == 2)
+        CHECK((g_c.A & 0xFF) == 0x33 && interp_bridge_lle_resume_pc() == 0x008003,
+              "A=%04X resume=$%06X exp 33 / $008003", g_c.A,
+              (unsigned)interp_bridge_lle_resume_pc());
+      else
+        CHECK((g_c.A & 0xFF) == 0x00 && interp_bridge_lle_resume_pc() == 0x008002,
+              "A=%04X resume=$%06X exp 00 / $008002", g_c.A,
+              (unsigned)interp_bridge_lle_resume_pc());
+    }
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_host_calls = 0; g_host_mode = 4;
+      uint8_t c[] = {0xA9,0x01, 0xEA, 0x60};
+      load(0x8000, c, sizeof c);
+      cpu_push_jsr_return_frame(&g_c);
+      interp_bridge_add_host_hook(0x008002, host_hook);
+      int rc = interp_bridge_run(&g_c, 0x008000);
+      interp_bridge_clear_host_hooks();
+      printf("S18e host hook SKIP is a contained bail\n");
+      CHECK(rc == 0 && g_host_calls == 1, "rc=%d calls=%d exp 0/1", rc, g_host_calls);
     }
     printf("\n==== interp_bridge Phase-1: %d/%d checks passed ====\n", g_check - g_fail, g_check);
     if (g_fail) { printf("RESULT: FAIL (%d)\n", g_fail); return 1; }

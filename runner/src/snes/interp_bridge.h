@@ -178,6 +178,42 @@ void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
 bool interp_bridge_add_pre_opcode_hook(uint32_t pc24, InterpPreOpcodeHook hook);
 void interp_bridge_pre_opcode_redirect(uint32_t pc24);
 
+/* Host continuation hooks: host C that runs IN PLACE OF the guest code at an
+ * interpreted PC, as a paired bounce owned by the interpreter frame that
+ * reached it (docs/HLE_FUNC.md, "Host continuation hooks").
+ *
+ * A pre-opcode hook can only observe or redirect. A host continuation hook
+ * returns a RecompReturn that the bridge handles exactly like the return of a
+ * bounced compiled call, so host code that calls compiled or interpreted
+ * guest code -- which may yield, hit the frame deadline, or hand a wait
+ * outward -- composes with the scheduler:
+ *
+ *   return 0          not claimed: the opcode at pc24 executes as usual (the
+ *                     next registered host hook for that PC is tried first);
+ *   return 1, NORMAL  the guest continues at *next_pc24 with the CpuState
+ *                     the hook left (PB comes from next_pc24);
+ *   return 1, LLE unwind sentinel (an unwind armed by
+ *                     interp_bridge_lle_yield_unwind, directly or deep in
+ *                     code the hook called): consumed by this frame when it
+ *                     owns it -- interpretation continues at the unwind PC --,
+ *                     handed to the host for a deadline, or propagated out of
+ *                     a nested frame, as at a bounce site;
+ *   return 1, SKIP_N  unsupported (no host caller to skip): contained bail.
+ *
+ * During the call the hook is the frame's bounce: an unwind it arms belongs
+ * to this frame, and the master deadline can fire inside it. Hooks compare
+ * the full pc24 they receive: the table keys on pc24 & 0x7FFFFF like the
+ * pre-opcode hooks, so a HiROM $C0 hook also fires at $40 (and $FF at $7F).
+ * Inert (one count test per opcode) while no host hook is registered. */
+typedef int (*InterpHostHook)(CpuState *cpu, uint32_t pc24,
+                              RecompReturn *result, uint32_t *next_pc24);
+bool interp_bridge_add_host_hook(uint32_t pc24, InterpHostHook hook);
+void interp_bridge_clear_host_hooks(void);
+/* True while an LLE yield unwind is armed and not yet consumed. Host code that
+ * receives a non-NORMAL RecompReturn from a guest call can tell the unwind
+ * sentinel from a genuine SKIP_N with it. */
+int interp_bridge_lle_unwind_pending(void);
+
 /*
  * Run the interpreter over guest code at entry_pc24, in the context of `cpu`.
  * `cpu` is updated in place. Returns:

@@ -477,6 +477,31 @@ void interp_bridge_pre_opcode_redirect(uint32_t pc24) {
     s_pre_opcode_redirect_valid = 1;
 }
 
+/* Host continuation hooks (interp_bridge.h). A separate table from the
+ * pre-opcode hooks: their callbacks have another contract (a RecompReturn
+ * handled like a bounce result), and the scan costs nothing while empty. */
+enum { kInterpHostHookSlots = 128 };
+static struct {
+    uint32_t pc24;
+    InterpHostHook hook;
+} s_host_hooks[kInterpHostHookSlots];
+static int s_host_hook_count;
+
+bool interp_bridge_add_host_hook(uint32_t pc24, InterpHostHook hook) {
+    if (!hook) return false;
+    const uint32_t key = pc24 & 0x7FFFFFu;
+    for (int i = 0; i < s_host_hook_count; ++i)
+        if (s_host_hooks[i].pc24 == key && s_host_hooks[i].hook == hook)
+            return true;
+    if (s_host_hook_count >= kInterpHostHookSlots) return false;
+    s_host_hooks[s_host_hook_count].pc24 = key;
+    s_host_hooks[s_host_hook_count].hook = hook;
+    ++s_host_hook_count;
+    return true;
+}
+
+void interp_bridge_clear_host_hooks(void) { s_host_hook_count = 0; }
+
 /* BRK bridge seam. The bounce is via explicit JSR/JSL interception below, not
  * via planted BRKs, so an interpreted BRK is treated as a no-op continue.
  * (Production hardening may route an unexpected BRK to a contained stop.) */
@@ -787,6 +812,7 @@ static void lle_unwind_arm(uint32_t pc24, int owner_depth, int is_deadline,
 }
 
 int interp_bridge_in_lle_scheduler(void) { return s_lle_sched_depth > 0; }
+int interp_bridge_lle_unwind_pending(void) { return s_lle_unwind_active; }
 /* A hardware wait can be reached inside an AOT body's nested fallback, not
  * just in the outer scheduler. Preserve the guest continuation and hand it
  * outward through the existing paired-call unwind until the host can run. */
@@ -2020,6 +2046,97 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
              * with the old pc_before would execute one opcode and classify
              * another, and could miss a terminal RTS. */
             if (redirected) continue;
+        }
+        /* Host continuation hooks (interp_bridge.h): host C claims this PC
+         * and runs as a paired bounce owned by this frame. Its result takes
+         * the bounce-site path below, reduced to the cases a host
+         * continuation can produce. */
+        if (s_host_hook_count > 0) {
+            const uint32_t key = pc_before & 0x7FFFFFu;
+            int host_resume = 0;
+            for (int hi = 0; hi < s_host_hook_count; hi++) {
+                if (s_host_hooks[hi].pc24 != key) continue;
+                sync_interp_to_cpu(&in, cpu);
+                RecompReturn hr = RECOMP_RETURN_NORMAL;
+                uint32_t next = pc_before;
+                if (s_apu_pending_master >= bridge_bounce_flush_thresh())
+                    bridge_apu_flush(cpu);
+                const int _apu_drv = g_interp_apu_driving;
+                const int _saved_bounce_base = s_interp_bounce_recomp_base;
+                const int _saved_bounce_owner = s_interp_bounce_owner_depth;
+                g_interp_apu_driving = 0;
+                s_interp_bounce_recomp_base = g_recomp_stack_top;
+                s_interp_bounce_owner_depth = s_interp_bridge_depth;
+                s_lle_next_unwind_is_deadline = 0;
+                g_interp_wlog_pc24 = 0;
+                const int claimed =
+                    s_host_hooks[hi].hook(cpu, pc_before, &hr, &next);
+                s_interp_bounce_owner_depth = _saved_bounce_owner;
+                s_interp_bounce_recomp_base = _saved_bounce_base;
+                g_interp_apu_driving = _apu_drv;
+                sync_cpu_to_interp(cpu, &in);
+                if (!claimed) continue;
+                if (hr == RECOMP_RETURN_NORMAL) {
+                    next &= 0xFFFFFFu;
+                    in.k  = (uint8)((next >> 16) & 0xFF);
+                    in.pc = (uint16)(next & 0xFFFF);
+                    interp_edge_note(pc_before, next, INTERP_EDGE_EXTERNAL,
+                                     0, in.sp);
+                    edge_expect = next;
+                    host_resume = 1;
+                    break;
+                }
+                if (s_lle_unwind_active) {
+                    if (s_lle_unwind_is_deadline) {
+                        /* As at the bounce site: only the scheduler frame
+                         * publishes the suspended PC; a nested frame keeps
+                         * the sentinel armed for its tier helper. */
+                        if (yield_pc) {
+                            lle_resume_set(s_lle_unwind_pc24,
+                                           INTERP_RESUME_SITE_DEADLINE_UNWIND,
+                                           in.sp);
+                            s_lle_unwind_active = 0;
+                            s_lle_unwind_owner_depth = 0;
+                            s_lle_unwind_is_deadline = 0;
+                        }
+                        sync_interp_to_cpu(&in, cpu);
+                        bridge_apu_flush(cpu);
+                        return 1;
+                    }
+                    if (s_lle_unwind_owner_depth == s_interp_bridge_depth) {
+                        const uint32_t up = s_lle_unwind_pc24 & 0xFFFFFFu;
+                        resume_ring_note(INTERP_RESUME_SITE_YIELD_UNWIND,
+                                         INTERP_RESUME_KIND_UNWIND_CONSUME,
+                                         pc_before, up, cpu->S);
+                        s_lle_unwind_active = 0;
+                        s_lle_unwind_owner_depth = 0;
+                        s_lle_unwind_is_deadline = 0;
+                        in.k  = (uint8)((up >> 16) & 0xFF);
+                        in.pc = (uint16)(up & 0xFFFF);
+                        interp_edge_note(pc_before, up, INTERP_EDGE_EXTERNAL,
+                                         0, in.sp);
+                        edge_expect = up;
+                        host_resume = 1;
+                        break;
+                    }
+                    sync_interp_to_cpu(&in, cpu);
+                    return 1;
+                }
+                {
+                    static int s_host_skip_logged;
+                    if (s_host_skip_logged < 8) {
+                        s_host_skip_logged++;
+                        fprintf(stderr, "[interp_bridge] host hook at $%06X "
+                                "returned %d (no host caller to skip) - "
+                                "contained bail\n",
+                                (unsigned)pc_before, (int)hr);
+                    }
+                }
+                sync_interp_to_cpu(&in, cpu);
+                bridge_apu_flush(cpu);
+                return 0;
+            }
+            if (host_resume) continue;
         }
         /* Opt-in control-flow tripwire: game code normally executes from the
          * LoROM $8000-$FFFF half of a bank.  If a return/jump crosses from ROM

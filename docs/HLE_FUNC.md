@@ -225,6 +225,56 @@ Partial delegation, where the replacement runs into the middle of the
 compiled original, is not supported. To get it, split the original with a
 second `func` boundary at the resume PC and delegate to that entry.
 
+## Host continuation hooks
+
+An `hle_func` is entered by a call. Two things never arrive that way: the
+continuation of a guest call that a helper made and that finished in the
+interpreter (after a yield unwind, the rest of the callee runs interpreted
+and its RTS lands on a plain ROM PC), and an interrupt handler reached through
+a RAM vector (`JML [$1300]`). A host continuation hook covers both:
+
+```c
+int Hook(CpuState *cpu, uint32_t pc24, RecompReturn *result, uint32_t *next_pc24);
+interp_bridge_add_host_hook(0xC0248D, Hook);
+```
+
+Before the interpreter executes the opcode at a registered PC, it offers the
+PC to the hook. Return 0 to decline (the opcode runs). Return 1 to claim it:
+the hook ran host code in place of the guest code, as a paired bounce owned by
+this interpreter frame, and the bridge handles `*result` like the return of a
+bounced compiled call:
+
+| `*result` | The interpreter |
+|---|---|
+| `NORMAL` | continues at `*next_pc24` with the CpuState the hook left |
+| LLE unwind sentinel, owned by this frame | continues at the unwind PC (for example the real ROM entry of a wait primitive) |
+| LLE unwind for the frame deadline | returns to the host; the scheduler frame publishes the unwind PC as its resume PC |
+| LLE unwind owned by an outer frame | ends this nested frame; its tier helper re-emits the sentinel |
+| `SKIP_N` | bails (there is no host caller to skip) |
+
+While the hook runs, an unwind it arms (directly, or deep in compiled code it
+calls) belongs to this frame, and `interp_bridge_lle_master_deadline_reached`
+can fire inside it. `interp_bridge_lle_unwind_pending()` tells host code that
+received a non-`NORMAL` value whether it is that sentinel.
+
+Uses:
+
+- **Resuming host code after a guest wait.** A hand-written routine running on
+  a fiber calls the guest's wait primitive with the routine's real return
+  address on the guest stack. The primitive's stub unwinds, the fiber
+  suspends, and the scheduler interprets the real wait. When the
+  interpreter reaches the return address (with the expected S), a host hook
+  switches back to the fiber. Between the two, the guest state is exactly
+  the ROM's, so dropping the fiber (save-state load, rewind) just lets the
+  ROM bytes finish the routine.
+- **Interrupt handlers in C.** A hook at the handler entry runs the handler
+  body and continues at the handler's own `RTI`, which ends the interrupt run.
+
+The table is separate from the pre-opcode hooks (128 slots, keyed on
+`pc24 & 0x7FFFFF`); hooks compare the full `pc24` they receive. With no hook
+registered the cost is one count test per interpreted opcode.
+`tests/interp816/bridge_test.c` (S18) pins the five outcomes.
+
 ## Example
 
 The routine at `$00:9000` (entered M=1, X=1, ending in RTS) returns the larger
