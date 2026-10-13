@@ -3,6 +3,16 @@
 The TOML contains names and tier choices, never instruction bytes. Keep manual
 cfg directives outside the marked blocks. Explicit AOT roots are returned to
 the emitter so emit=true does not depend on --cfg-roots or vector reachability.
+
+`emit` takes three values:
+
+- `true`: a `func` declaration and an explicit analysis root;
+- `false` (the default): a `symbol` label plus a `force_lle` boundary;
+- `"label"`: a `symbol` label only. The name reaches the generated code when
+  analysis discovers the routine on its own, and nothing else changes: no
+  root, no tier choice. It is the way to name every discovered function
+  without perturbing analysis. An older framework rejects the string, so a
+  label can never silently degrade into a `force_lle` boundary.
 """
 
 from __future__ import annotations
@@ -27,6 +37,8 @@ class FunctionSymbol:
     emit: bool
     entry_m: int
     entry_x: int
+    # emit = "label": name only, neither a root nor a force_lle boundary.
+    label: bool = False
 
     @property
     def pc24(self) -> int:
@@ -72,8 +84,11 @@ def load_symbols(path: Path) -> list[FunctionSymbol]:
             raise ValueError(f"{context}: name must be a C identifier")
         context += f" ({name})"
         emit = item.get("emit", False)
-        if type(emit) is not bool:
-            raise ValueError(f"{context}: emit must be true or false")
+        label = emit == "label"
+        if label:
+            emit = False
+        elif type(emit) is not bool:
+            raise ValueError(f'{context}: emit must be true, false or "label"')
         symbol = FunctionSymbol(
             name,
             _number(item.get("bank", 0), 0xFF, "bank", context),
@@ -81,12 +96,13 @@ def load_symbols(path: Path) -> list[FunctionSymbol]:
             emit,
             _number(item.get("entry_m", 1), 1, "entry_m", context),
             _number(item.get("entry_x", 1), 1, "entry_x", context),
+            label,
         )
         previous = names.get(name)
         if previous is not None and previous != symbol.pc24:
             raise ValueError(f"{context}: name already used at ${previous:06X}")
         names[name] = symbol.pc24
-        policy = (emit, symbol.entry_m, symbol.entry_x)
+        policy = ("label" if label else emit, symbol.entry_m, symbol.entry_x)
         previous = addresses.get(symbol.pc24)
         if previous is not None and previous != policy:
             raise ValueError(f"{context}: conflicting tier/entry modes at ${symbol.pc24:06X}")
@@ -158,6 +174,8 @@ def sync_symbols(cfg_dir: Path) -> list[FunctionSymbol]:
                 entries[symbol.addr] = symbol
             else:
                 lines.append(f"symbol {symbol.pc24:06x} {symbol.name}")
+            if symbol.label:
+                continue
             if not symbol.emit and symbol.pc24 not in forced:
                 lines.append(f"force_lle {symbol.pc24:06x}")
                 forced.add(symbol.pc24)
@@ -168,5 +186,6 @@ def sync_symbols(cfg_dir: Path) -> list[FunctionSymbol]:
     for path, updated in pending:
         _atomic_write(path, updated)
     print(f"symbols: synchronized {len(symbols)} function labels "
-          f"({sum(s.emit for s in symbols)} AOT requests) from {source}")
+          f"({sum(s.emit for s in symbols)} AOT requests, "
+          f"{sum(s.label for s in symbols)} name-only) from {source}")
     return symbols

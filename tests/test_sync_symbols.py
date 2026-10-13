@@ -178,3 +178,68 @@ def test_cli_generates_unreachable_hirom_symbol_and_honors_tier_toggle(tmp_path)
     assert not any(node["disposition"] == "aot_eligible"
                    for node in manifest["nodes"].values())
     assert "008000:M1X1" not in manifest["roots"]
+
+
+def write_label(cfg, name, bank, addr, extra=""):
+    (cfg / "symbols.toml").write_text(
+        f'[[func]]\nname = "{name}"\nbank = {bank}\naddr = "{addr:04x}"\n'
+        f'emit = "label"\n' + extra, encoding="utf-8")
+
+
+def test_label_names_without_root_or_lle_boundary(tmp_path):
+    write_label(tmp_path, "Named", 0xc2, 0x1234)
+    symbols = sync_symbols(tmp_path)
+    assert [(s.name, s.emit, s.label) for s in symbols] == [("Named", False, True)]
+    cfg = load_bank_cfg(str(tmp_path / "bankc2.cfg"))
+    assert not cfg.entries
+    assert [(s.name, s.addr_24) for s in cfg.symbols] == [("Named", 0xc21234)]
+    assert not cfg.force_lle
+    # A label and a root at one address are two tier policies: refuse.
+    write_label(tmp_path, "Named", 0xc2, 0x1234,
+                '[[func]]\nname = "Root"\nbank = 0xc2\naddr = "1234"\nemit = true\n')
+    with pytest.raises(ValueError, match="conflicting tier"):
+        sync_symbols(tmp_path)
+    (tmp_path / "symbols.toml").write_text(
+        '[[func]]\nname = "Bad"\nbank = 0\naddr = "8000"\nemit = "lable"\n')
+    with pytest.raises(ValueError, match='"label"'):
+        sync_symbols(tmp_path)
+
+
+def test_cli_label_renames_a_discovered_function_without_changing_analysis(tmp_path):
+    # Synthetic HiROM, no game data: reset JSRs to $00:8010, which analysis
+    # discovers by itself. A label must rename it and change nothing else.
+    rom = bytearray([0xff] * 0x10000)
+    rom[0x8000:0x8004] = bytes([0x20, 0x10, 0x80, 0x60])   # JSR $8010 ; RTS
+    rom[0x8010] = 0x60                                     # RTS
+    rom[0xffd5] = 0x21
+    rom[0xffdc:0xffe0] = bytes([0xff, 0xff, 0, 0])
+    rom[0xfffc:0xfffe] = bytes([0, 0x80])
+    image = tmp_path / "fixture.sfc"
+    image.write_bytes(rom)
+    cfg = tmp_path / "recomp"
+    cfg.mkdir()
+    (cfg / "bank00.cfg").write_text("bank = 00\nauto_vectors\n")
+    out = tmp_path / "gen"
+    command = [sys.executable, str(ROOT / "snesrecomp_cli.py"), "generate",
+               "--rom", str(image), "--cfg-dir", str(cfg), "--out-dir", str(out),
+               "--funcs-h", str(cfg / "funcs.h"), "--no-host-root-scan", "--json-progress"]
+
+    def run():
+        result = subprocess.run(command, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        manifest = json.loads((out / "program_manifest.json").read_text())
+        source = "".join(p.read_text() for p in sorted(out.glob("bank*.c")))
+        return manifest, source
+
+    before, source = run()
+    assert "bank_00_8010_M1X1" in source
+    write_label(cfg, "Helper", 0, 0x8010)
+    after, source = run()
+    assert "Helper_M1X1" in source and "bank_00_8010" not in source
+    assert after["roots"] == before["roots"]
+    assert after["nodes"].keys() == before["nodes"].keys()
+    assert {k: v["disposition"] for k, v in after["nodes"].items()} == \
+        {k: v["disposition"] for k, v in before["nodes"].items()}
+    text = (cfg / "bank00.cfg").read_text()
+    assert "symbol 008010 Helper" in text and "force_lle 008010" not in text
+    assert "Helper" not in (cfg / "funcs.h").read_text()
