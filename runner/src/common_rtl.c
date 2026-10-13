@@ -1926,10 +1926,13 @@ void RtlApuWrite(uint16 adr, uint8 val) {
 
 #ifdef SNES_COSIM
   /* The shared-clock co-sim advances the SPC synchronously and compares two
-   * execution models instruction-for-instruction. Keep its bus mutation at
-   * the already-aligned current clock. */
+   * execution models instruction-for-instruction. The SPC first runs the
+   * touch credit owed so far (rtl_sync_apu_to_cpu_locked), then the write
+   * lands at that clock -- the same point in the guest instruction stream on
+   * both sides. */
   if (cosim_apu_shared_clock()) {
     RtlApuLock();
+    rtl_sync_apu_to_cpu_locked();
     audio_trace_on_cpu_port_write(port, val);
     apu_writePortNow(g_snes->apu, port, val);
     RtlApuUnlock();
@@ -1972,7 +1975,16 @@ void rtl_sync_apu_to_cpu_locked(void) {
     apus_prof_calls++; }
   clock_t _t1 = clock();
 #endif
-  if (!g_apu_frame_time_valid) {
+  /* Shared co-sim clock: the touch credit is the only SPC clock, before and
+   * during frames alike. The guest-timestamp path below is a per-side clock
+   * (master_cycles), and its port timeline is never anchored here because
+   * shared-clock writes bypass apu_schedulePortWrite -- taking it froze the
+   * SPC for the whole run (Romancing SaGa 3 spun in its IPL handshake). */
+  if (!g_apu_frame_time_valid
+#ifdef SNES_COSIM
+      || cosim_apu_shared_clock()
+#endif
+      ) {
     rtl_accumulate_apu_catchup();
     snes_catchupApu(g_snes);
 #ifdef SNESRECOMP_INTERP_PROFILE
@@ -2010,6 +2022,12 @@ void rtl_apu_pace_check(void) {
    * blocks disturbs that pacing and can stall the vblank poll loop. Only
    * pace once real frames are running. */
   if (snes_frame_counter == 0) return;
+#ifdef SNES_COSIM
+  /* Shared co-sim clock: the SPC advances at HW touches only. A per-block
+   * flush happens in compiled code but not in the interpreter, so it would
+   * move SPC time relative to the guest instruction stream on one side. */
+  if (cosim_apu_shared_clock()) return;
+#endif
   uint64_t delta = g_cpu.master_cycles - g_apu_last_sync_master;
   if (delta < 1024) return;
   RtlApuLock();
