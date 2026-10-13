@@ -41,6 +41,20 @@ static uint32_t s_resume_pc;
 /* The CPU executed WAI and is halted until an interrupt line asserts. */
 static bool s_wai_halted;
 
+/* Lagless pacing (diagnostic, off by default): the field's NMI is held until
+ * the CPU half waits, for at most this many extra fields. See
+ * snes_beam_frame_driver_set_lagless in beam_frame_driver.h. */
+static int s_lagless_fields;
+static SnesBeamWaitHint *s_wait_hint;
+
+void snes_beam_frame_driver_set_lagless(int max_fields) {
+  s_lagless_fields = max_fields > 0 ? max_fields : 0;
+}
+
+void snes_beam_frame_driver_set_wait_hint(SnesBeamWaitHint *hint) {
+  s_wait_hint = hint;
+}
+
 static uint32_t read_vector(uint32_t addr) {
   /* Through the guest bus, so a mapper or coprocessor window resolves the
    * vector the way the CPU sees it. */
@@ -130,7 +144,22 @@ void snes_beam_frame_driver_run_frame(void) {
     uint32_t to_vblank = snes_master_clocks_until_line(g_snes, BFD_VBLANK_LINE);
     frame_end = g_snes->beamMasterLast +
                 (to_vblank ? to_vblank : BFD_MASTER_CYCLES_PER_FIELD);
+    /* Lagless: a held field can leave the CPU past the beam's next edge.
+     * Keep the boundary on the V=225 grid, ahead of the CPU. */
+    if (s_lagless_fields && frame_end <= g_cpu.master_cycles)
+      frame_end += ((g_cpu.master_cycles - frame_end) / BFD_MASTER_CYCLES_PER_FIELD + 1) *
+                   BFD_MASTER_CYCLES_PER_FIELD;
   }
+  /* Lagless: how far the CPU half may run past frame_end before the field
+   * ends anyway (the CPU never waited). Equal to frame_end when off. */
+  const uint64_t hold_end =
+      frame_end + (uint64_t)s_lagless_fields * BFD_MASTER_CYCLES_PER_FIELD;
+  /* Lagless: the CPU half met frame_end while working, not waiting. */
+  bool busy = false;
+  /* Lagless: the last CPU run ended in a wait (stable poll or WAI). A
+   * re-entered poll that the deadline cuts before the interpreter sees it
+   * repeat is still that wait, not work. */
+  bool waiting = false;
 
   if (booting) {
     s_resume_pc = reset_vector();
@@ -153,13 +182,26 @@ void snes_beam_frame_driver_run_frame(void) {
     run_interrupt(nmi_vector(), frame_end);
     g_snes->inNmi = false;
   }
+  /* Lagless: after a held field the next edge can fall right behind the NMI
+   * handler. The CPU half has not run this step yet: hold the field for it
+   * instead of ending it with no step taken (two NMIs for one step). */
+  if (s_lagless_fields && g_cpu.master_cycles >= frame_end)
+    busy = true;
 
   /* Run out the field, taking each interrupt at the beam position it latches
    * at -- not from the render walk afterwards, where the beam is parked at
    * V=225 and a handler that reads OPVCT sees the wrong line. */
-  while (g_cpu.master_cycles < frame_end && slices++ < BFD_MAX_SLICES_PER_FIELD) {
+  while ((g_cpu.master_cycles < frame_end || (busy && g_cpu.master_cycles < hold_end)) &&
+         slices++ < BFD_MAX_SLICES_PER_FIELD * (1 + s_lagless_fields)) {
     uint64_t next;
     uint32_t to_irq;
+    /* Lagless, held field: run a line at a time, so the field ends within a
+     * line of the CPU reaching a wait the interpreter does not stop at. */
+    const uint64_t deadline =
+        !busy ? frame_end
+              : g_cpu.master_cycles + BFD_MASTER_CYCLES_PER_LINE < hold_end
+                    ? g_cpu.master_cycles + BFD_MASTER_CYCLES_PER_LINE
+                    : hold_end;
 
     /* WAI halts the CPU until an interrupt line asserts -- NMI (next field),
      * a raster match or a coprocessor IRQ. With I set the IRQ wakes it
@@ -170,25 +212,46 @@ void snes_beam_frame_driver_run_frame(void) {
     if (s_wai_halted && irq_line_asserted())
       s_wai_halted = false;
     if (!s_wai_halted && !irq_wanted()) {
-      interp_bridge_set_master_deadline(frame_end);
+      const bool was_waiting = waiting;
+      interp_bridge_set_master_deadline(deadline);
       (void)interp_bridge_run_until_quiescent(&g_cpu, s_resume_pc);
       interp_bridge_set_master_deadline(0);
       update_resume_pc();
       if (interp_bridge_lle_took_wai())
         s_wai_halted = true;
+      /* Lagless: cut at frame_end while working -> hold the field and run on
+       * (a compiled spin-wait cut there resumes in the interpreter, which
+       * sees its stable poll); cut at hold_end -> give up; returned early with
+       * no interrupt to take -> the CPU is waiting. */
+      if (s_lagless_fields) {
+        if (g_cpu.master_cycles >= deadline) {
+          const bool in_wait = was_waiting || (s_wait_hint && s_wait_hint(s_resume_pc));
+          busy = !in_wait && g_cpu.master_cycles < hold_end;
+          if (in_wait)
+            waiting = true;
+        } else {
+          waiting = s_wai_halted || !irq_wanted();
+          if (waiting)
+            busy = false;
+        }
+      }
     }
     /* Past the boundary, an interrupt belongs to the next frame. Delivering
      * one with the deadline already spent made the handler yield on its first
      * instruction, and the next delivery stacked a second interrupt frame on
      * top: Doom's bottom split DMAs from line 199 across V=225 (the forced-
      * blank borders exist to give it that time), so this was every field. */
-    if (g_cpu.master_cycles >= frame_end)
+    if (g_cpu.master_cycles >= frame_end && !busy)
       break;
     if (irq_wanted()) {
       s_wai_halted = false;
-      run_interrupt(irq_vector(), frame_end);
+      waiting = false;
+      run_interrupt(irq_vector(), busy ? hold_end : frame_end);
       continue;
     }
+    /* Lagless, still working past the edge: no parked time. */
+    if (busy)
+      continue;
     /* Pay the beam what it owes first: those clocks can latch the next
      * split. */
     if (beam_debt()) {

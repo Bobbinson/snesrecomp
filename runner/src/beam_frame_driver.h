@@ -1,6 +1,7 @@
 #ifndef SNESRECOMP_BEAM_FRAME_DRIVER_H
 #define SNESRECOMP_BEAM_FRAME_DRIVER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Beam-aligned frame driver for whole-program LLE ports.
@@ -49,5 +50,21 @@ typedef struct SnesBeamFrameDriverState {
 } SnesBeamFrameDriverState;
 void snes_beam_frame_driver_get_state(SnesBeamFrameDriverState *out);
 void snes_beam_frame_driver_set_state(const SnesBeamFrameDriverState *in);
+/* Lagless pacing, a diagnostic mode (0 = off, the default). When the CPU half
+ * meets the field's V=225 edge while still working, the field is held and the
+ * CPU runs on until it waits (stable poll or WAI), for at most max_fields more
+ * fields; the NMI is then taken at the next frame's start, where the CPU waits.
+ * Every game step thus gets exactly one NMI however long it computes, so two
+ * execution models that charge different cycles for the same work stay in
+ * step frame for frame. Used by differential co-simulation; it is not the
+ * hardware's timing (a real console drops frames: lag). */
+void snes_beam_frame_driver_set_lagless(int max_fields);
+/* Lagless pacing: whether a CPU that the field edge cut at resume_pc24 was
+ * waiting -- a poll the interpreter has not recognised as a stable state (a
+ * loop whose flags or registers change while it polls), or a compiled
+ * spin-wait. The port knows its wait primitives; NULL (the default) counts
+ * only interpreter-detected stable polls and WAI. */
+typedef bool SnesBeamWaitHint(uint32_t resume_pc24);
+void snes_beam_frame_driver_set_wait_hint(SnesBeamWaitHint *hint);
 
 #endif /* SNESRECOMP_BEAM_FRAME_DRIVER_H */
