@@ -55,6 +55,10 @@ class Side:
             try:
                 s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                # The 5 s bound is for connecting. One `step` is a whole stride
+                # of guest frames, which a fully interpreted side under load
+                # can take far longer to run: only a hang should time out.
+                s.settimeout(float(os.environ.get("SNES_COSIM_STEP_TIMEOUT", "900")))
                 self.sock = s
                 self.buf = b""
                 return
@@ -162,11 +166,25 @@ def parse_ram_mask(spec):
     return mask
 
 
-def ram_divergence_masked(a, b, keys, siga, sigb, mask):
+def parse_dead_stack(spec):
+    """'0x1F00-0x1FFF' -> (lo, hi): the stack page range in which bytes at or
+    below the live S are dead (a push stores at S, then decrements)."""
+    lo, _, hi = spec.partition("-")
+    return int(lo, 0), int(hi or "0x1FFF", 0)
+
+
+def live_s(side):
+    """Guest S from the `cpu` field dump (A=.. X=.. Y=.. S=1F75 ...)."""
+    s = kv(side.cmd("cpu")).get("S")
+    return int(s, 16) if s else None
+
+
+def ram_divergence_masked(a, b, keys, siga, sigb, mask, dead_stack=None):
     """True iff the divergence is confined to `ram` AND a byte-level dumpram
-    diff shows every differing WRAM offset inside `mask`. Never a blind
-    waiver: the byte diff is re-verified on every occurrence. Returns
-    (masked: bool, diff_offsets: list)."""
+    diff shows every differing WRAM offset inside `mask`, or (dead_stack)
+    inside the dead stack: [lo, min(S_A, S_B)] within the declared stack
+    range. Never a blind waiver: the byte diff is re-verified on every
+    occurrence. Returns (masked: bool, diff_offsets: list)."""
     split = [k for k, va, vb in zip(keys, siga.split("|"), sigb.split("|"))
              if va != vb]
     if split != ["ram"]:
@@ -180,7 +198,13 @@ def ram_divergence_masked(a, b, keys, siga, sigb, mask):
     da = open("cosim_maskchk_A.bin", "rb").read()
     db = open("cosim_maskchk_B.bin", "rb").read()
     diffs = [i for i in range(min(len(da), len(db))) if da[i] != db[i]]
-    return (len(diffs) > 0 and all(i in mask for i in diffs)), diffs
+    dead_lo, dead_hi = 1, 0
+    if dead_stack:
+        sa, sb = live_s(a), live_s(b)
+        if sa is not None and sb is not None:
+            dead_lo, dead_hi = dead_stack[0], min(sa, sb, dead_stack[1])
+    masked = [i for i in diffs if (mask and i in mask) or dead_lo <= i <= dead_hi]
+    return (len(diffs) > 0 and len(masked) == len(diffs)), diffs
 
 
 def report_divergence(a, b, cp):
@@ -248,6 +272,14 @@ def main():
                     "is inside the mask is it logged MASKED and the run "
                     "continues — verified per occurrence, never a blind "
                     "waiver. Requires --compare (needs per-key sigs).")
+    ap.add_argument("--dead-stack",
+                    help="stack page range LO-HI (e.g. 0x1F00-0x1FFF) whose "
+                    "bytes at or below the live S are DEAD: what pushes and "
+                    "interrupt frames left there differs between execution "
+                    "models (a C replacement keeps no 65816 stack). Same "
+                    "byte-verified rule as --ram-mask, with S read from both "
+                    "sides at each occurrence (S itself is compared in cpu). "
+                    "Requires --compare.")
     args = ap.parse_args()
     keys = args.compare.split(",") if args.compare else None
 
@@ -261,9 +293,13 @@ def main():
     injected = args.inject is None
     transients = []
     masked_cps = []
+    last_masked_offs = None
     ram_mask = parse_ram_mask(args.ram_mask) if args.ram_mask else None
     if ram_mask and not keys:
         die("--ram-mask requires --compare (per-key signatures)")
+    dead_stack = parse_dead_stack(args.dead_stack) if args.dead_stack else None
+    if dead_stack and not keys:
+        die("--dead-stack requires --compare (per-key signatures)")
     t0 = time.time()
     i = 0
     while i < args.max:
@@ -280,14 +316,18 @@ def main():
             print(f"injected {args.inject} into B at cp {cpa}: {r}")
             injected = True
         if cha != chb:
-            if ram_mask:
-                ok_mask, offs = ram_divergence_masked(a, b, keys, cha, chb, ram_mask)
+            if ram_mask or dead_stack:
+                ok_mask, offs = ram_divergence_masked(a, b, keys, cha, chb, ram_mask,
+                                                      dead_stack)
                 if ok_mask:
                     masked_cps.append(cpa)
-                    if len(masked_cps) <= 8 or len(masked_cps) % 500 == 0:
+                    # Report the first few, then each change of the byte set.
+                    if (len(masked_cps) <= 8 or len(masked_cps) % 500 == 0
+                            or offs != last_masked_offs):
                         print(f"  MASKED ram divergence at cp {cpa} "
                               f"(bytes: {['0x%04X' % o for o in offs]}, "
                               f"occurrence #{len(masked_cps)})")
+                    last_masked_offs = offs
                     continue
             first_cp, reconverged = cpa, False
             for g in range(1, args.transient_grace + 1):
