@@ -194,11 +194,15 @@ def test_label_names_without_root_or_lle_boundary(tmp_path):
     assert not cfg.entries
     assert [(s.name, s.addr_24) for s in cfg.symbols] == [("Named", 0xc21234)]
     assert not cfg.force_lle
-    # A label and a root at one address are two tier policies: refuse.
+    # A root appended later at the labelled address (a coverage tool) keeps
+    # its tier and its name; the label gives way instead of conflicting.
     write_label(tmp_path, "Named", 0xc2, 0x1234,
                 '[[func]]\nname = "Root"\nbank = 0xc2\naddr = "1234"\nemit = true\n')
-    with pytest.raises(ValueError, match="conflicting tier"):
-        sync_symbols(tmp_path)
+    symbols = sync_symbols(tmp_path)
+    assert [(s.name, s.emit, s.label) for s in symbols] == [("Root", True, False)]
+    cfg = load_bank_cfg(str(tmp_path / "bankc2.cfg"))
+    assert [(e.name, e.start) for e in cfg.entries] == [("Root", 0x1234)]
+    assert not cfg.symbols and not cfg.force_lle
     (tmp_path / "symbols.toml").write_text(
         '[[func]]\nname = "Bad"\nbank = 0\naddr = "8000"\nemit = "lable"\n')
     with pytest.raises(ValueError, match='"label"'):

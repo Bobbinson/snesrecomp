@@ -12,7 +12,9 @@ the emitter so emit=true does not depend on --cfg-roots or vector reachability.
   analysis discovers the routine on its own, and nothing else changes: no
   root, no tier choice. It is the way to name every discovered function
   without perturbing analysis. An older framework rejects the string, so a
-  label can never silently degrade into a `force_lle` boundary.
+  label can never silently degrade into a `force_lle` boundary. A label
+  gives way to any other entry at its address (a root appended by a
+  coverage tool keeps its tier and its name).
 """
 
 from __future__ import annotations
@@ -72,9 +74,8 @@ def load_symbols(path: Path) -> list[FunctionSymbol]:
     functions = data.get("func", [])
     if not isinstance(functions, list):
         raise ValueError(f"{path}: expected [[func]] tables")
-    result = []
+    parsed = []
     names = {}
-    addresses = {}
     for index, item in enumerate(functions, 1):
         context = f"{path}: func #{index}"
         if not isinstance(item, dict):
@@ -102,7 +103,17 @@ def load_symbols(path: Path) -> list[FunctionSymbol]:
         if previous is not None and previous != symbol.pc24:
             raise ValueError(f"{context}: name already used at ${previous:06X}")
         names[name] = symbol.pc24
-        policy = ("label" if label else emit, symbol.entry_m, symbol.entry_x)
+        parsed.append((context, symbol))
+    # A label only names; any other entry at its address (a root a coverage
+    # tool appended, an LLE boundary) carries the tier and its own name, so
+    # the label gives way instead of conflicting with it.
+    claimed = {symbol.pc24 for _context, symbol in parsed if not symbol.label}
+    result = []
+    addresses = {}
+    for context, symbol in parsed:
+        if symbol.label and symbol.pc24 in claimed:
+            continue
+        policy = (symbol.emit, symbol.entry_m, symbol.entry_x)
         previous = addresses.get(symbol.pc24)
         if previous is not None and previous != policy:
             raise ValueError(f"{context}: conflicting tier/entry modes at ${symbol.pc24:06X}")
