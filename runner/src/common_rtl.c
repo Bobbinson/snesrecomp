@@ -956,6 +956,7 @@ bool RtlLoadSnapshot(const char *filename) {
     bool ok=fread(bytes,1,(size_t)end,f)==(size_t)end;
     fclose(f);
     if(ok)ok=RtlLoadSnapshotFromMemory(bytes,(size_t)end);
+    if(ok)ppu_rasterReset();   /* a file load, see below */
     free(bytes);return ok;
   }
   uint32 hdr[2];
@@ -992,6 +993,15 @@ bool RtlLoadSnapshot(const char *filename) {
   g_snes->beamMasterLast = g_cpu.master_cycles;
   snes_mod_audio_stop_all();
   PpuResetWidescreenOamHistory(g_snes->ppu);
+  /* The raster journal (ppu.c) is host state outside the snapshot: its two
+   * fields still hold the abandoned timeline. A render restores a field's
+   * baseline into the live register file, so after a load in a running
+   * process the stale display registers (TM/TS, colour math, BGnSC...) drew
+   * every other frame wrong and kept feeding themselves back until the game
+   * rewrote them. Re-arm it from the restored registers on the next frame,
+   * as a fresh process does. File loads only: the in-memory snapshots of
+   * rewind, run-ahead and rollback keep their behaviour. */
+  ppu_rasterReset();
   /* Post-load reconciliation: host-side execution state (fibers, HLE
    * scheduler bookkeeping) cannot live in the guest snapshot; give the
    * game one hook to rebuild it against the freshly restored WRAM. */
