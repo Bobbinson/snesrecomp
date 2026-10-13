@@ -243,3 +243,34 @@ def test_cli_label_renames_a_discovered_function_without_changing_analysis(tmp_p
     text = (cfg / "bank00.cfg").read_text()
     assert "symbol 008010 Helper" in text and "force_lle 008010" not in text
     assert "Helper" not in (cfg / "funcs.h").read_text()
+
+
+def test_cli_root_rename_takes_effect_in_one_generation(tmp_path):
+    # funcs.h still names the root by its old name until generation rewrites
+    # it; the cfg must win, or the rename needs a second regeneration.
+    rom = bytearray([0xff] * 0x10000)
+    rom[0x100] = rom[0x8000] = 0x60
+    rom[0xffd5] = 0x21
+    rom[0xffdc:0xffe0] = bytes([0xff, 0xff, 0, 0])
+    rom[0xfffc:0xfffe] = bytes([0, 0x80])
+    image = tmp_path / "fixture.sfc"
+    image.write_bytes(rom)
+    cfg = tmp_path / "recomp"
+    cfg.mkdir()
+    (cfg / "bank00.cfg").write_text("bank = 00\nauto_vectors\n")
+    out = tmp_path / "gen"
+    command = [sys.executable, str(ROOT / "snesrecomp_cli.py"), "generate",
+               "--rom", str(image), "--cfg-dir", str(cfg), "--out-dir", str(out),
+               "--funcs-h", str(cfg / "funcs.h"), "--no-host-root-scan", "--json-progress"]
+
+    def run():
+        result = subprocess.run(command, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return "".join(p.read_text() for p in sorted(out.glob("*.c")))
+
+    write_symbols(cfg, ("OldName", 0xc0, 0x100, True))
+    assert "OldName_M1X1" in run()
+    write_symbols(cfg, ("NewName", 0xc0, 0x100, True))
+    source = run()
+    assert "NewName_M1X1" in source and "OldName" not in source
+    assert "void NewName(CpuState *cpu)" in (cfg / "funcs.h").read_text()
