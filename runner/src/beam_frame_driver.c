@@ -160,6 +160,8 @@ void snes_beam_frame_driver_run_frame(void) {
    * re-entered poll that the deadline cuts before the interpreter sees it
    * repeat is still that wait, not work. */
   bool waiting = false;
+  /* Lagless: the field was held past frame_end for the CPU's work. */
+  bool held = false;
 
   if (booting) {
     s_resume_pc = reset_vector();
@@ -233,6 +235,19 @@ void snes_beam_frame_driver_run_frame(void) {
           waiting = s_wai_halted || !irq_wanted();
           if (waiting)
             busy = false;
+        }
+        if (busy)
+          held = true;
+        /* Lagless: a held step has reached its wait past the edge. Park to
+         * the next V=225 of the grid, as hardware does once the work is
+         * done: the next NMI then comes at the beam edge, not wherever this
+         * side's cycle count ended the work, so the handler and the next
+         * step see the same beam on both sides of a co-sim pair (a handler
+         * started mid-field polled the beam a different number of times). */
+        else if (held && waiting && g_cpu.master_cycles >= frame_end) {
+          frame_end += ((g_cpu.master_cycles - frame_end) / BFD_MASTER_CYCLES_PER_FIELD + 1) *
+                       BFD_MASTER_CYCLES_PER_FIELD;
+          held = false;
         }
       }
     }

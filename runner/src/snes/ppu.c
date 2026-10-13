@@ -3074,13 +3074,24 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
        * beam is a per-side clock -- compiled and interpreted code charge
        * different cycles for the same instructions -- so a game seeding its
        * RNG from OPHCT (Romancing SaGa 3 at $C0:01A7) gets a different seed
-       * on each side. The HW-touch count is the clock both sides advance
-       * identically (same guest instructions => same touches). */
+       * on each side. The latch reads a clock both sides advance alike:
+       * the host frame (one game step under lagless pacing) and the number
+       * of latches taken in it. Not the HW-touch count: a poll of HVBJOY or
+       * RDNMI iterates with the live beam, so that count drifts too (it
+       * did, by 10 touches, after a held field). Each latch moves H by 13
+       * and V by 29, coprime with 340 and 262: a guest loop that waits for
+       * a line or a change still sees every value. */
       if (g_cosim_virtual_hv) {
-        extern uint64_t g_main_cpu_cycles_estimate;
-        uint64_t t = g_main_cpu_cycles_estimate >> 8;
-        ppu->hCount = (uint16_t)((t * 13u) % 340u);
-        ppu->vCount = (uint16_t)((t / 340u) % 262u);
+        extern int snes_frame_counter;
+        static int s_latch_frame = -1;
+        static uint32_t s_latch_n;
+        if (s_latch_frame != snes_frame_counter) {
+          s_latch_frame = snes_frame_counter;
+          s_latch_n = 0;
+        }
+        const uint32_t f = (uint32_t)snes_frame_counter, n = s_latch_n++;
+        ppu->hCount = (uint16_t)((f * 89u + n * 13u) % 340u);
+        ppu->vCount = (uint16_t)((f * 7u + n * 29u) % 262u);
       }
 #endif
       ppu->hCountSecond = false;
