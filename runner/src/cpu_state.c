@@ -430,6 +430,16 @@ extern void snesrecomp_read_hook(uint8 bank, uint16 addr, int width);
 #define READ_HOOK(b, a, w) ((void)0)
 #endif
 
+#ifdef SNESRECOMP_HW_ACCESS_HOOK
+/* Dev-only hardware-register access hook (cpu_state.h). */
+static CpuHwAccessHook s_hw_access_hook;
+void cpu_set_hw_access_hook(CpuHwAccessHook hook) { s_hw_access_hook = hook; }
+#define HW_ACCESS_HOOK(w, b, a, v, n) \
+    do { if (s_hw_access_hook) s_hw_access_hook((w), (b), (a), (uint16)(v), (n)); } while (0)
+#else
+#define HW_ACCESS_HOOK(w, b, a, v, n) ((void)0)
+#endif
+
 uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
     READ_HOOK(bank, addr, 1);
     if (g_snes && g_snes->cart)
@@ -439,7 +449,9 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
     if (is_hw_reg(bank, addr)) {
         cpu_pace_cycles(addr);
         cpu_hw_log(addr, 1, 0);
-        return cpu_latch_read8(cpu, ReadRegOpenBus(addr, cpu->open_bus));
+        uint8 hv = ReadRegOpenBus(addr, cpu->open_bus);
+        HW_ACCESS_HOOK(0, bank, addr, hv, 1);
+        return cpu_latch_read8(cpu, hv);
     }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX)
         return cpu_latch_read8(cpu, cart_read(g_snes->cart, bank, addr));
@@ -489,11 +501,15 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
         uint8 hi;
         cpu_pace_cycles_word(addr);
         cpu_hw_log(addr, 1, 0);
-        if (addr >= 0x2140 && addr <= 0x217F)
-            return cpu_latch_read16(cpu, ReadRegWord(addr));
+        if (addr >= 0x2140 && addr <= 0x217F) {
+            uint16 wv = ReadRegWord(addr);
+            HW_ACCESS_HOOK(0, bank, addr, wv, 2);
+            return cpu_latch_read16(cpu, wv);
+        }
         lo = ReadRegOpenBus(addr, cpu->open_bus);
         cpu->open_bus = lo;
         hi = ReadRegOpenBus((uint16)(addr + 1), cpu->open_bus);
+        HW_ACCESS_HOOK(0, bank, addr, (uint16)lo | ((uint16)hi << 8), 2);
         return cpu_latch_read16(cpu, (uint16)lo | ((uint16)hi << 8));
     }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
@@ -613,7 +629,12 @@ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
 #endif
         return;
     }
-    if (is_hw_reg(bank, addr)) { cpu_pace_cycles(addr); cpu_hw_log(addr, 0, v); WriteReg(addr, v); return; }
+    if (is_hw_reg(bank, addr)) {
+        cpu_pace_cycles(addr); cpu_hw_log(addr, 0, v);
+        HW_ACCESS_HOOK(1, bank, addr, v, 1);
+        WriteReg(addr, v);
+        return;
+    }
     if (g_snes && g_snes->cart && g_snes->cart->type == CART_SUPERFX) {
         cart_write(g_snes->cart, bank, addr, v); return;
     }
@@ -701,6 +722,7 @@ void cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v) {
     if (is_hw_reg(bank, addr)) {
         cpu_pace_cycles_word(addr);
         cpu_hw_log(addr, 0, v);
+        HW_ACCESS_HOOK(1, bank, addr, v, 2);
         WriteRegWord(addr, v);
         cpu->open_bus = (uint8)(v >> 8);
         return;

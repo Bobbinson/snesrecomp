@@ -124,6 +124,26 @@ void interp_bridge_dump_recent(int n, FILE *out);
  * 1 accelerated. Native interrupt helpers retain their ordinary policy. */
 void interp_bridge_set_scheduler_aot_policy(int enabled);
 
+/* Interpret-everything override for differential tests (a per-function
+ * bench that wants the exact ROM bytes as its oracle). While set, NO
+ * interpreter frame -- scheduler, nested tier-down (interp_tier_*), or a
+ * host-invoked run -- bounces a JSR/JSL/JSR (abs,X) into a compiled body or
+ * an hle_func stub: every callee runs from its ROM bytes. The scheduler
+ * policy above and SNESRECOMP_LLE_BOUNCE only govern scheduler frames, so a
+ * routine run through interp_tier_run_call_frame still reaches compiled code
+ * without this. 0 restores the normal per-frame policy. Host test policy,
+ * never part of a snapshot; default off. */
+void interp_bridge_set_interpret_all(int enabled);
+int interp_bridge_interpret_all(void);
+
+/* Ask the innermost running interpreter frame to stop at its next opcode
+ * boundary exactly as the step cap would (a contained bail: the run returns
+ * 0), without the step-cap diagnostics. One-shot. For a test host that has
+ * recognised a wait the guest cannot leave without an interrupt (a frame
+ * wait primitive, a stable poll) and wants the bail now, not two million
+ * opcodes later. */
+void interp_bridge_request_bail(void);
+
 /* Once port time is mapped, the frame timeline and interpreter catch-up
  * describe the same elapsed time. Extended-frame hosts use absolute sync;
  * legacy hosts and unmapped boot (e.g. Mega Man X's IPL polling) keep relative

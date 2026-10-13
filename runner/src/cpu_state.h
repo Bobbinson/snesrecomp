@@ -410,6 +410,19 @@ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr);
 void   cpu_write8 (CpuState *cpu, uint8 bank, uint16 addr, uint8  v);
 void   cpu_write16(CpuState *cpu, uint8 bank, uint16 addr, uint16 v);
 
+/* Optional hardware-register access hook, compiled in only with
+ * -DSNESRECOMP_HW_ACCESS_HOOK (dev targets such as a per-function test bench;
+ * shipping builds have neither the call nor the setter). Called for every
+ * access that cpu_read8/16 / cpu_write8/16 route to ReadReg/WriteReg
+ * ($2000-$5FFF in banks $00-$3F/$80-$BF) -- the one bus both execution tiers
+ * share -- with the value read or written and its width (1, or 2 for a
+ * little-endian word). A write is reported before it reaches WriteReg. */
+typedef void (*CpuHwAccessHook)(int is_write, uint8 bank, uint16 addr,
+                                uint16 value, int width);
+#ifdef SNESRECOMP_HW_ACCESS_HOOK
+void cpu_set_hw_access_hook(CpuHwAccessHook hook);
+#endif
+
 /* Region-paced AOT bus (2026-08-31): the AOT emitter charges block const
  * cycles minus data transfers, and paces each data/stack/pointer access
  * here at its region speed so master_cycles matches the LLE per-transfer

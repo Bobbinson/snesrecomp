@@ -1063,6 +1063,17 @@ static int s_scheduler_aot_policy = -1;
 void interp_bridge_set_scheduler_aot_policy(int enabled) {
     s_scheduler_aot_policy = enabled < 0 ? -1 : enabled != 0;
 }
+/* See interp_bridge.h: forces every interpreter frame to run callees from
+ * their ROM bytes (no AOT / hle_func bounce). Test policy, default off. */
+static int s_interpret_all = 0;
+void interp_bridge_set_interpret_all(int enabled) {
+    s_interpret_all = enabled != 0;
+}
+int interp_bridge_interpret_all(void) { return s_interpret_all; }
+/* One-shot bail request (interp_bridge.h), consumed by the next opcode
+ * boundary of whichever interpreter frame is running. */
+static int s_bail_requested = 0;
+void interp_bridge_request_bail(void) { s_bail_requested = 1; }
 static int lle_yield_bounce_enabled(void) {
     if (s_scheduler_aot_policy >= 0) return s_scheduler_aot_policy;
     static int v = -1;
@@ -1588,7 +1599,13 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
         const char *_e = getenv("SNESRECOMP_NO_POLLGATE");
         s_poll_gate = (_e && _e[0] && _e[0] != '0') ? 0 : 1;
     }
+    int bail_requested = 0;
     for (; steps < step_cap; steps++) {
+        if (s_bail_requested) {   /* host test request: bail as the cap would */
+            s_bail_requested = 0;
+            bail_requested = 1;
+            break;
+        }
         const uint32_t pc_before = ((uint32_t)in.k << 16) | in.pc;
 #ifdef SNESRECOMP_INTERP_PROFILE
         g_interp_total_steps++;
@@ -2620,6 +2637,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
              * coroutine switch. SNESRECOMP_LLE_BOUNCE=0 restores the
              * interpret-everything behavior (A/B differential lever). */
             const int bounce_ok =
+                !s_interpret_all &&
                 (!yield_pc || lle_yield_bounce_enabled()) &&
                 !lle_bounce_target_excluded(target);
             const int has_body  = cpu_dispatch_has_entry(cpu, target);
@@ -2861,7 +2879,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
 
     /* Step cap hit — contained bail. Sync so observable state is consistent;
      * the caller treats a 0 return as "gap not cleanly resolved". */
-    {
+    if (!bail_requested) {
         static int s_cap_reports;
         if (s_cap_reports < 32) {
             const uint32_t last_pc = ((uint32_t)in.k << 16) | in.pc;
@@ -2916,7 +2934,7 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
     sync_interp_to_cpu(&in, cpu);
     bridge_apu_flush(cpu);
     /* Post-sync diagnostic: decode the instruction at step-cap PC */
-    {
+    if (!bail_requested) {
         static uint32_t s_last_diag_pc;
         uint32_t pc24 = ((uint32_t)in.k << 16) | in.pc;
         if (pc24 != s_last_diag_pc) {

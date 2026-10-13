@@ -2,6 +2,11 @@
 
 #include "cpu_trace.h"
 
+/* Function-entry host hook (cpu_trace.h). Defined in every build so a dev
+ * target can set it; only trace builds and -DSNESRECOMP_FUNC_ENTRY_HOOK
+ * builds ever call it. */
+CpuFuncEntryHook g_cpu_func_entry_hook = 0;
+
 #if SNESRECOMP_TRACE
 
 #include "common_cpu_infra.h"
@@ -1374,6 +1379,7 @@ static uint32_t fnv1a(const char *s) {
 }
 
 void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) {
+    if (g_cpu_func_entry_hook) g_cpu_func_entry_hook(cpu, pc24, name);
     if (g_freeze_capture) return;  /* deliberate inspection-freeze */
     /* Investigation (env-gated): log DB/PB at every function entry inside a
      * frame window so a data-bank divergence can be located by chain.

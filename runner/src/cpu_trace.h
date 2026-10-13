@@ -159,6 +159,15 @@ enum {
     BD_EXIT_KIND_TRAMPOLINE = 3,
 };
 
+/* Optional host hook on every generated function entry (the prologue's
+ * cpu_trace_func_entry call, hle_func stubs included), with the guest state
+ * at the routine's first instruction and its return frame already pushed.
+ * NULL by default. Trace builds always honour it; other builds compile the
+ * call in only with -DSNESRECOMP_FUNC_ENTRY_HOOK (a dev target such as a
+ * per-function test bench), so a shipping build pays nothing. */
+typedef void (*CpuFuncEntryHook)(CpuState *cpu, uint32_t pc24, const char *name);
+extern CpuFuncEntryHook g_cpu_func_entry_hook;
+
 #if SNESRECOMP_TRACE
 
 /* Heap-allocated ring; pointer + capacity are mutable. The capacity is
@@ -1314,7 +1323,13 @@ void cpu_trace_dump_wram(const char *tag, int scan_n);
 #else  /* SNESRECOMP_TRACE = 0 */
 
 static inline void cpu_trace_block(CpuState *cpu, uint32_t pc24)            { (void)cpu; (void)pc24; }
+#ifdef SNESRECOMP_FUNC_ENTRY_HOOK
+static inline void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) {
+    if (g_cpu_func_entry_hook) g_cpu_func_entry_hook(cpu, pc24, name);
+}
+#else
 static inline void cpu_trace_func_entry(CpuState *cpu, uint32_t pc24, const char *name) { (void)cpu; (void)pc24; (void)name; }
+#endif
 static inline void cpu_trace_event(CpuState *cpu, uint32_t pc24, uint8_t et,
                                    uint8_t e0, uint16_t e1)                 { (void)cpu; (void)pc24; (void)et; (void)e0; (void)e1; }
 static inline void cpu_trace_db_change(CpuState *cpu, uint32_t pc24, uint8_t o,
