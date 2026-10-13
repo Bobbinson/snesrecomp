@@ -1187,6 +1187,26 @@ void RtlDrawPpuFrame(uint8 *pixel_buffer, size_t pitch, uint32 render_flags) {
   RtlWidescreenPresent(pixel_buffer, pitch, g_my_pixels, g_snes_width, g_snes_height);
 }
 
+/* SNESRECOMP_TURBO_RENDER: a frame rasterised but not presented still hands
+ * its composed picture to the debug server (debug_server_note_composed_frame,
+ * through RtlDrawPpuFrame), into a scratch buffer the presenter never sees.
+ * Only for a title-owned compositor: without one the server captures the
+ * PPU's render buffer, which the raster already refreshed. */
+static void PublishUnpresentedFrame(void) {
+  static uint8 *buf;
+  static size_t cap;
+  if (!g_game->draw_frame || g_snes_width <= 0 || g_snes_height <= 0)
+    return;
+  size_t need = (size_t)g_snes_width * (size_t)g_snes_height * 4u;
+  if (need > cap) {
+    free(buf);
+    buf = (uint8 *)malloc(need);
+    cap = buf ? need : 0;
+  }
+  if (buf)
+    RtlDrawPpuFrame(buf, (size_t)g_snes_width * 4u, g_ppu_render_flags);
+}
+
 /* The OSD (FPS readout, turbo, save-slot toasts) composited into the frame.
  * The framework rasterizes it for a ~3x window; the frame is 1x, so it lands
  * at half size here and the SDL/GL scale brings it back. Window-space chrome
@@ -4212,6 +4232,13 @@ error_reading:;
      * inert. */
     if (!runahead_captured)
       CaptureSimulationFrame(frameCtr);
+    /* ...and the title's composed picture too. With a title-owned
+     * draw_frame the debug server's screenshot is the COMPOSED frame, which
+     * only a present refreshed: under turbo a capture was up to 15 frames
+     * old, and right after a state load it was whatever the process had
+     * presented before the jump. */
+    if (skip_present && turbo_render)
+      PublishUnpresentedFrame();
     NoteStateFrame();
     g_audio_producer_active = false;
     ProfileEnd(kProfileRaster, profile_start);
