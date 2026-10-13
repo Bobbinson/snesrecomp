@@ -4194,6 +4194,39 @@ static void cmd_get_trace_range(const char *args) {
     send_line(buf);
 }
 
+/* loadstate / savestate are performed by the main thread: the network thread
+ * must never walk live state itself. The host consumes the request at the top
+ * of its loop AND while the server holds the game parked at a frame boundary
+ * (paused, or at the end of a step), through debug_server_wait_if_paused_
+ * serviced: a state saved while paused at frame N is the machine after N
+ * frames, and a state loaded while paused is in place before the next step
+ * runs. Before, a parked game only saw the request at the top of the NEXT
+ * iteration: the parked frame ran first, so "savestate; step" saved one frame
+ * late and "loadstate; step" ran one frame of the old state before loading.
+ *
+ * The reply waits (up to 5 s) for the main thread to report the operation
+ * done (debug_server_note_state_op_done) and gives the frame counter after
+ * it; "done":false means the host has not reached a service point yet (its
+ * own pause, a menu) and the request is still pending. */
+static volatile int s_state_ops_done = 0;
+static volatile int s_state_op_frame = -1;
+
+void debug_server_note_state_op_done(void) {
+    s_state_op_frame = snes_frame_counter;
+    s_state_ops_done++;
+}
+
+static int wait_state_op(int before) {
+    for (int waited = 0; s_state_ops_done == before && waited < 5000; waited++) {
+#ifdef _WIN32
+        Sleep(1);
+#else
+        usleep(1000);
+#endif
+    }
+    return s_state_ops_done != before;
+}
+
 static void cmd_loadstate(const char *args) {
     int slot = 0;
     if (args[0]) sscanf(args, "%d", &slot);
@@ -4201,13 +4234,15 @@ static void cmd_loadstate(const char *args) {
         send_fmt("{\"error\":\"slot must be 0-11\"}");
         return;
     }
+    int before = s_state_ops_done;
     s_pending_loadstate = slot;
-    send_fmt("{\"ok\":true,\"loading_slot\":%d}", slot);
+    int done = wait_state_op(before);
+    send_fmt("{\"ok\":true,\"loading_slot\":%d,\"done\":%s,\"frame\":%d}", slot,
+             done ? "true" : "false", done ? s_state_op_frame : snes_frame_counter);
 }
 
-/* savestate <slot> — snapshot the RtlSaveLoad slot from the main thread on
- * the next frame boundary (same handoff pattern as loadstate; the network
- * thread must never walk live state itself). */
+/* savestate <slot> — snapshot the RtlSaveLoad slot from the main thread, at
+ * the boundary the game is parked on (same handoff as loadstate, above). */
 static volatile int s_pending_savestate = -1;
 static void cmd_savestate(const char *args) {
     int slot = 0;
@@ -4216,8 +4251,11 @@ static void cmd_savestate(const char *args) {
         send_fmt("{\"error\":\"slot must be 0-11\"}");
         return;
     }
+    int before = s_state_ops_done;
     s_pending_savestate = slot;
-    send_fmt("{\"ok\":true,\"saving_slot\":%d}", slot);
+    int done = wait_state_op(before);
+    send_fmt("{\"ok\":true,\"saving_slot\":%d,\"done\":%s,\"frame\":%d}", slot,
+             done ? "true" : "false", done ? s_state_op_frame : snes_frame_counter);
 }
 
 // ---- L3 harness: synchronous save_state / load_state ----
@@ -9045,6 +9083,18 @@ void debug_server_start_paused(void) {
 
 void debug_server_wait_if_paused(void) {
     while (s_paused) {
+#ifdef _WIN32
+        Sleep(10);
+#else
+        usleep(10000);
+#endif
+    }
+}
+
+void debug_server_wait_if_paused_serviced(void (*service)(void)) {
+    while (s_paused) {
+        if (service)
+            service();
 #ifdef _WIN32
         Sleep(10);
 #else

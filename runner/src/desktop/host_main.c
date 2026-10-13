@@ -475,6 +475,28 @@ static void GameReset(void) {
   g_reset_clock = true;
 }
 
+/* The debug server's savestate/loadstate, on the main thread. Called at the
+ * top of every loop iteration and, while the server holds the game parked,
+ * from inside the park (debug_server_wait_if_paused_serviced): the operation
+ * then acts on the frame boundary the game is stopped on. Dropped, but still
+ * acknowledged, during netplay. */
+static void ServiceDebugStateRequests(void) {
+  int ls = debug_server_consume_loadstate();
+  if (ls >= 0) {
+    if (!g_netplay_session) {
+      RtlSaveLoad(kSaveLoad_Load, ls);
+      GameReset();
+    }
+    debug_server_note_state_op_done();
+  }
+  int ss = debug_server_consume_savestate();
+  if (ss >= 0) {
+    if (!g_netplay_session)
+      RtlSaveLoad(kSaveLoad_Save, ss);
+    debug_server_note_state_op_done();
+  }
+}
+
 /* The Reset hotkey, and the script's `reset`: one path, so a test of the
  * script command is a test of what the player presses. */
 static void ConsoleReset(void) {
@@ -3859,18 +3881,9 @@ error_reading:;
       g_gamepad[0].axis_buttons = 0;
     if (g_input_state & 0xf0000)
       g_gamepad[1].axis_buttons = 0;
-    {
-      int ls = debug_server_consume_loadstate();
-      if (ls >= 0 && !g_netplay_session) {
-        RtlSaveLoad(kSaveLoad_Load, ls);
-        GameReset();
-      }
-      int ss = debug_server_consume_savestate();
-      if (ss >= 0 && !g_netplay_session)
-        RtlSaveLoad(kSaveLoad_Save, ss);
-    }
+    ServiceDebugStateRequests();
     double before_debug_wait = MonotonicSeconds();
-    if (!g_netplay_session) debug_server_wait_if_paused();
+    if (!g_netplay_session) debug_server_wait_if_paused_serviced(&ServiceDebugStateRequests);
     if (MonotonicSeconds() - before_debug_wait > 0.05)
       g_reset_clock = true;
 

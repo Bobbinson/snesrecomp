@@ -52,6 +52,15 @@ void debug_server_start_paused(void);
 // Block until unpaused. Call this once per frame in the main game loop.
 void debug_server_wait_if_paused(void);
 
+// Same park, at a frame boundary, calling service() about every 10 ms while
+// parked: the host performs the TCP-requested savestate/loadstate there, so
+// they act on the boundary the game is stopped on, not one frame later.
+void debug_server_wait_if_paused_serviced(void (*service)(void));
+
+// The host performed (or dropped) a consumed savestate/loadstate request:
+// the TCP reply, which waits for this, can go out.
+void debug_server_note_state_op_done(void);
+
 // Called from cpu_trace_block() in normal trace builds. Lets the TCP
 // breakpoint commands park on generated basic-block PCs without requiring
 // reverse-debug WRAM-store instrumentation.
@@ -152,6 +161,8 @@ static inline void debug_server_poll(void) { }
 static inline void debug_server_shutdown(void) { }
 static inline void debug_server_start_paused(void) { }
 static inline void debug_server_wait_if_paused(void) { }
+static inline void debug_server_wait_if_paused_serviced(void (*service)(void)) { (void)service; }
+static inline void debug_server_note_state_op_done(void) { }
 static inline void debug_server_on_trace_block(void *cpu, uint32_t pc24) { (void)cpu; (void)pc24; }
 static inline int debug_server_consume_loadstate(void) { return -1; }
 static inline int debug_server_consume_savestate(void) { return -1; }
