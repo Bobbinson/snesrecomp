@@ -1074,6 +1074,8 @@ int interp_bridge_interpret_all(void) { return s_interpret_all; }
  * boundary of whichever interpreter frame is running. */
 static int s_bail_requested = 0;
 void interp_bridge_request_bail(void) { s_bail_requested = 1; }
+/* See interp_bridge.h: settle the interpreter's banked SPC time now. */
+void interp_bridge_apu_flush_pending(CpuState *cpu) { bridge_apu_flush(cpu); }
 static int lle_yield_bounce_enabled(void) {
     if (s_scheduler_aot_policy >= 0) return s_scheduler_aot_policy;
     static int v = -1;

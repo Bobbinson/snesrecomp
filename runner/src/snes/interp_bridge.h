@@ -144,6 +144,15 @@ int interp_bridge_interpret_all(void);
  * opcodes later. */
 void interp_bridge_request_bail(void);
 
+/* Settle the SPC time the interpreter has banked but not yet handed to the
+ * APU (the batched per-opcode advance, part of the rollback state). Only the
+ * interpreter's own APU-port accesses consume it, so after a snapshot load a
+ * test host that runs one routine interpreted and then compiled from that
+ * same state would see the SPC advanced on one side only. Calling this right
+ * after each load gives both runs the same starting APU state. No-op when
+ * nothing is pending. */
+void interp_bridge_apu_flush_pending(CpuState *cpu);
+
 /* Once port time is mapped, the frame timeline and interpreter catch-up
  * describe the same elapsed time. Extended-frame hosts use absolute sync;
  * legacy hosts and unmapped boot (e.g. Mega Man X's IPL polling) keep relative
