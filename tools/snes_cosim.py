@@ -142,6 +142,33 @@ def step_subset(side, keys):
     return int(d["cp"]), sig
 
 
+def step_pair(a, b, keys):
+    """Advance both sides one checkpoint, in parallel: both `step` commands go
+    out before either reply is read, so each side runs its stride while the
+    other does (two independent processes; a side's stride used to wait for
+    the other's). Returns ((cp_a, sig_a), (cp_b, sig_b)) as step_subset /
+    step_chain would."""
+    for side in (a, b):
+        side.sock.sendall(b"step 1\n")
+    replies = [side._line() for side in (a, b)]
+    out = []
+    for side, r in zip((a, b), replies):
+        d = kv(r)
+        if keys:
+            if "cp" not in d:
+                die(f"{side.name}: unparseable step reply {r!r}")
+            s = kv(side.cmd("sub"))
+            sig = "|".join(s.get(k, "?") for k in keys)
+            if "?" in sig.split("|"):
+                die(f"{side.name}: sub missing a compared key {keys}: {s}")
+            out.append((int(d["cp"]), sig))
+        else:
+            if "chain" not in d or "cp" not in d:
+                die(f"{side.name}: unparseable step reply {r!r} (tool would be BLIND)")
+            out.append((int(d["cp"]), d["chain"]))
+    return out[0], out[1]
+
+
 def _host_path(p):
     """MSYS python cwd is POSIX (/f/...); the guest exe's fopen needs F:/..."""
     p = os.path.abspath(p).replace("\\", "/")
@@ -304,10 +331,7 @@ def main():
     i = 0
     while i < args.max:
         i += 1
-        if keys:
-            cpa, cha = step_subset(a, keys); cpb, chb = step_subset(b, keys)
-        else:
-            cpa, cha = step_chain(a); cpb, chb = step_chain(b)
+        (cpa, cha), (cpb, chb) = step_pair(a, b, keys)
         if cpa != cpb:
             print(f"cp index skew: A={cpa} B={cpb} (harness bug — should never happen)")
         if not injected and cpa >= args.inject_at:
@@ -334,10 +358,7 @@ def main():
                 if i >= args.max:
                     break
                 i += 1
-                if keys:
-                    cpa, cha = step_subset(a, keys); cpb, chb = step_subset(b, keys)
-                else:
-                    cpa, cha = step_chain(a); cpb, chb = step_chain(b)
+                (cpa, cha), (cpb, chb) = step_pair(a, b, keys)
                 if cha == chb:
                     transients.append((first_cp, g))
                     print(f"  TRANSIENT divergence at cp {first_cp} — "
