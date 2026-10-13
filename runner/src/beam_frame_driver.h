@@ -63,8 +63,12 @@ void snes_beam_frame_driver_set_lagless(int max_fields);
  * waiting -- a poll the interpreter has not recognised as a stable state (a
  * loop whose flags or registers change while it polls), or a compiled
  * spin-wait. The port knows its wait primitives; NULL (the default) counts
- * only interpreter-detected stable polls and WAI. */
-typedef bool SnesBeamWaitHint(uint32_t resume_pc24);
+ * only interpreter-detected stable polls and WAI. Returns the wait loop's
+ * head (0: not a wait). An NMI taken while the CPU waits there returns to
+ * the head, whatever loop instruction each side stopped on: a handler that
+ * records the interrupted PC (Romancing SaGa 3's battle NMI saves it in RAM
+ * to hijack its RTI) then sees the same one on both sides. */
+typedef uint32_t SnesBeamWaitHint(uint32_t resume_pc24);
 void snes_beam_frame_driver_set_wait_hint(SnesBeamWaitHint *hint);
 
 #endif /* SNESRECOMP_BEAM_FRAME_DRIVER_H */

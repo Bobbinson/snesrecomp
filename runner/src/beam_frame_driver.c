@@ -179,6 +179,14 @@ void snes_beam_frame_driver_run_frame(void) {
   /* NMITIMEN gates NMI; nothing is delivered before reset has run, since
    * there is no instruction stream to interrupt yet. */
   if (!booting && g_snes->nmiEnabled) {
+    /* Lagless: a CPU waiting in a declared wait loop takes the NMI at the
+     * loop's head (see SnesBeamWaitHint): which loop instruction the field
+     * edge found it on depends on each side's cycle count. */
+    if (s_lagless_fields && s_wait_hint) {
+      const uint32_t head = s_wait_hint(s_resume_pc);
+      if (head)
+        s_resume_pc = head;
+    }
     g_snes->inNmi = true;
     s_wai_halted = false;
     run_interrupt(nmi_vector(), frame_end);
@@ -227,7 +235,7 @@ void snes_beam_frame_driver_run_frame(void) {
        * no interrupt to take -> the CPU is waiting. */
       if (s_lagless_fields) {
         if (g_cpu.master_cycles >= deadline) {
-          const bool in_wait = was_waiting || (s_wait_hint && s_wait_hint(s_resume_pc));
+          const bool in_wait = was_waiting || (s_wait_hint && s_wait_hint(s_resume_pc) != 0);
           busy = !in_wait && g_cpu.master_cycles < hold_end;
           if (in_wait)
             waiting = true;
