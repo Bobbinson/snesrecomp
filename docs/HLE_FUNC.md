@@ -338,7 +338,8 @@ ignores the directive and emits no table.
 own name with a local back-edge, stub ownership, the table, the cfg check,
 `--no-hle`); `tests/runtime_dispatch/diagnostic_gates_test.c` pins the entry
 contract of `cpu_hle_call_original` (call and tail arrivals, return-to-ancestor
-depths, no stale arrival).
+depths, no stale arrival), and `known_lle_entry_test.c` the table lookup
+(live M/X, execution mirror, missing row).
 
 ## Host continuation hooks
 
