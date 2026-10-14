@@ -94,6 +94,15 @@ static uint8_t *s_ram = NULL;
 static uint32_t s_ram_size = 0;
 // Note: s_frame_counter pointer removed — use snes_frame_counter directly
 static volatile int s_paused = 0;
+/* The main thread's parks (debug_server_wait_if_paused*): entries counted, and
+ * whether it is parked right now. s_paused is raised by the end of a step or a
+ * run_to_frame INSIDE the frame (debug_server_record_frame, in RtlRunFrame),
+ * before the host has finished that frame -- raster, composed picture,
+ * after-frame hooks -- and before the frame counter moves. A read issued in
+ * that window sees a half-finished boundary: a screenshot showed the previous
+ * frame's picture. cmd_step and cmd_screenshot wait for the park instead. */
+static volatile int s_park_entries = 0;
+static volatile int s_parked_now = 0;
 static volatile int s_step_remaining = 0;  // frames remaining before auto-re-pause
 static volatile int s_run_to_frame_target = -1;  // -1 = disabled
 static volatile int s_pending_loadstate = -1;  // -1 = none, 0-11 = slot to load
@@ -2461,10 +2470,29 @@ static void cmd_func_snap_get_n(const char *args) {
     send(s_client_sock, "\"}\n", 3, 0);
 }
 
+/* Wait (up to ~1 s) for the main thread to park after `before` park entries,
+ * i.e. at the boundary that follows the frame which raised s_paused. 0 if it
+ * did not (resumed meanwhile, or a host that never parks: netplay). */
+static int wait_park_since(int before) {
+    for (int waited = 0; waited < 1000; waited++) {
+        if (s_park_entries != before)
+            return 1;
+        if (!s_paused)
+            return 0;
+#ifdef _WIN32
+        Sleep(1);
+#else
+        usleep(1000);
+#endif
+    }
+    return 0;
+}
+
 static void cmd_step(const char *args) {
     int n = 1;
     if (args[0]) sscanf(args, "%d", &n);
     int start_frame = snes_frame_counter;
+    int parks_before = s_park_entries;
     s_run_to_frame_target = -1;
     s_step_remaining = n;
     s_paused = 0;
@@ -2482,8 +2510,13 @@ static void cmd_step(const char *args) {
         if (++waited >= 150000) break;    /* cap at 4.5 s */
 #endif
     }
-    send_fmt("{\"ok\":true,\"stepped\":%d,\"frame_before\":%d,\"frame_after\":%d%s}",
-             n, start_frame, snes_frame_counter,
+    /* The last frame ends the step from inside RtlRunFrame, before the host
+     * has drawn it and before the frame counter moves. Reply once the main
+     * thread is parked at the boundary after it, so the reply's frame and any
+     * read sent after the reply (screenshot, dump_ram...) are that frame's. */
+    int parked = s_step_remaining > 0 ? 0 : wait_park_since(parks_before);
+    send_fmt("{\"ok\":true,\"stepped\":%d,\"frame_before\":%d,\"frame_after\":%d,\"parked\":%s%s}",
+             n, start_frame, snes_frame_counter, parked ? "true" : "false",
              (s_step_remaining > 0) ? ",\"timeout\":true" : "");
 }
 
@@ -5062,6 +5095,18 @@ void debug_server_note_composed_frame(const void *argb, unsigned pitch,
 
 static void cmd_screenshot(const char *args) {
     if (!g_ppu) { send_fmt("{\"error\":\"ppu not available\"}"); return; }
+
+    /* Asked while the game is pausing (a step or run_to_frame has just ended
+     * its last frame, the host is still drawing it): wait for the park, or the
+     * copy below is the previous frame's picture (seen: a step answered, the
+     * frame counter read, then a capture of frame N showing frame N - 1). */
+    for (int waited = 0; s_paused && !s_parked_now && waited < 1000; waited++) {
+#ifdef _WIN32
+        Sleep(1);
+#else
+        usleep(1000);
+#endif
+    }
 
     // Copy the most recently presented buffer. Re-rendering here loses
     // presentation-only layers (including widescreen coprocessor pixels) and
@@ -9082,6 +9127,10 @@ void debug_server_start_paused(void) {
 }
 
 void debug_server_wait_if_paused(void) {
+    if (!s_paused)
+        return;
+    s_parked_now = 1;
+    s_park_entries++;
     while (s_paused) {
 #ifdef _WIN32
         Sleep(10);
@@ -9089,9 +9138,14 @@ void debug_server_wait_if_paused(void) {
         usleep(10000);
 #endif
     }
+    s_parked_now = 0;
 }
 
 void debug_server_wait_if_paused_serviced(void (*service)(void)) {
+    if (!s_paused)
+        return;
+    s_parked_now = 1;
+    s_park_entries++;
     while (s_paused) {
         if (service)
             service();
@@ -9101,6 +9155,7 @@ void debug_server_wait_if_paused_serviced(void (*service)(void)) {
         usleep(10000);
 #endif
     }
+    s_parked_now = 0;
 }
 
 void debug_server_on_trace_block(CpuState *cpu, uint32_t pc24) {
