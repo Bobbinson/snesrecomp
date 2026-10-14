@@ -604,7 +604,8 @@ def build_emission_entries(manifest: ProgramManifest, parsed,
     # body of a replaced routine, emitted under `<Name>_orig` for exactly the
     # variants the analysis compiles at that PC -- the bodies a plain build
     # dispatches to. They live beside the stub (same bank, same PC) but own
-    # no dispatch slot; emit_dispatch_table lists them in their own table.
+    # no dispatch slot; emit_hle_original_table lists them in their own
+    # table (hle_original_v2.c).
     if enable_hle:
         aot_modes = defaultdict(set)
         for key, node in manifest.nodes.items():

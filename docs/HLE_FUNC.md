@@ -322,7 +322,17 @@ harness that compares `P` against the mirrors after the routine sees the
 same stale byte with or without the replacement.
 
 **Cost.** The kept bodies are the bodies a plain build compiles, so the
-generated tree only grows by them, plus one table row per kept PC.
+generated tree only grows by them, plus one table row per kept PC: a project
+that replaces compiled routines one by one keeps the size it had before the
+replacements, plus the four small stubs per `hle_func`. Measured on Romancing
+SaGa 3 (88 MB of generated C): one kept routine adds 37.8 KB of C (+0.04 %),
+0.02 s to its translation unit and 0.09 s for `hle_original_v2.c`; keeping all
+30 of its `hle_func` routines (31 bodies) adds 1.0 MB (+1.1 %) and about
+1 % to the compile time of the 9 translation units involved.
+
+The feature lives in the manifest-driven pipeline (`tools/v2_emit.py`, the
+`snesrecomp_cli.py generate` front end); the legacy `tools/v2_regen.py`
+ignores the directive and emits no table.
 
 `tests/v2/test_hle_keep_original.py` pins the emitter side (body under its
 own name with a local back-edge, stub ownership, the table, the cfg check,
