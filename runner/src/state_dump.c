@@ -223,15 +223,21 @@ int snes_state_dump(const char *dir, const char *tag, const uint8_t *pixels,
 
   FILE *f = open_out(dir, tag, ".info.json", "w");
   if (f) {
+    /* cpu_s / cpu_cycles: the guest stack pointer and CPU-cycle total at the
+     * dump, so a comparison of two runs can exclude the dead stack (bytes at
+     * and below S, which two execution models fill differently) and check
+     * the CPU-cycle count next to the master clock. */
     fprintf(f, "{\"frame\": %u, \"fb_width\": 256, \"fb_height\": %d, "
                "\"pixel_format\": \"BGRX8888\", \"source\": \"snesrecomp\", "
                "\"layer_mask\": %u, \"sram_size\": %u, "
-               "\"master_clock\": %llu, \"vpos\": %u, \"hpos\": %u}\n",
+               "\"master_clock\": %llu, \"vpos\": %u, \"hpos\": %u, "
+               "\"cpu_s\": %u, \"cpu_cycles\": %llu}\n",
             frame, pixels ? height : 0, g_snes_ppu_dbg_layer_mask,
             g_snes && g_snes->cart ? g_snes->cart->ramSize : 0,
             (unsigned long long)g_cpu.master_cycles,
             g_snes ? (unsigned)g_snes->vPos : 0u,
-            g_snes ? (unsigned)g_snes->hPos : 0u);
+            g_snes ? (unsigned)g_snes->hPos : 0u,
+            (unsigned)g_cpu.S, (unsigned long long)g_cpu.cycles);
     fclose(f);
   }
   return rc;
