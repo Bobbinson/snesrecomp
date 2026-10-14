@@ -314,6 +314,29 @@ int main(void) {
                    "LoROM open bus to ROM word crosses mapping boundary");
     fails += check(cpu.open_bus == 0x3c, "word high byte updates latch");
 
+    /* Kept compiled originals (cfg hle_keep_original): the table a port hands
+     * to cpu_dispatch_table_body is searched like the dispatch table, for the
+     * live M/X, with the LoROM execution-mirror fallback. */
+    {
+        static const DispatchEntry originals[] = {
+            {0x008100u, {NULL, NULL, fake_aot, NULL}, 0},
+            {0x009000u, {fake_aot, NULL, NULL, NULL}, 0},
+        };
+        cart.type = CART_LOROM;
+        cpu.m_flag = 1; cpu.x_flag = 0;
+        fails += check(cpu_dispatch_table_body(originals, 2, 0x008100u, &cpu) == fake_aot,
+                       "kept original found for the live M/X");
+        fails += check(cpu_dispatch_table_body(originals, 2, 0x808100u, &cpu) == fake_aot,
+                       "kept original found through the LoROM execution mirror");
+        cpu.m_flag = 1; cpu.x_flag = 1;
+        fails += check(cpu_dispatch_table_body(originals, 2, 0x008100u, &cpu) == NULL,
+                       "no kept body for an M/X the analysis interpreted");
+        fails += check(cpu_dispatch_table_body(originals, 2, 0x008200u, &cpu) == NULL,
+                       "no row: nothing kept");
+        fails += check(cpu_dispatch_table_body(originals, 0, 0x008100u, &cpu) == NULL,
+                       "empty table");
+    }
+
     if (fails) return 1;
     puts("known_lle_entry_test: PASS");
     return 0;

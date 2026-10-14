@@ -1117,6 +1117,33 @@ static int dispatch_has_rom_mirror(uint32 pc24) {
     return a && a == b;
 }
 
+/* Kept compiled originals (cpu_state.h): the dispatch binary search on any
+ * table sorted by pc24 -- g_hle_original_table, handed in by a port -- with
+ * the same LoROM execution-mirror fallback as the dispatch row lookups. */
+static const DispatchEntry *_table_find(const DispatchEntry *table, unsigned count,
+                                        uint32 pc24) {
+    unsigned lo = 0, hi = count;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        uint32 mid_pc = table[mid].pc24;
+        if (mid_pc == pc24) return &table[mid];
+        if (mid_pc < pc24) lo = mid + 1;
+        else               hi = mid;
+    }
+    return NULL;
+}
+
+RecompBodyFn cpu_dispatch_table_body(const DispatchEntry *table, unsigned count,
+                                     uint32 pc24, const CpuState *cpu) {
+    if (!table || !cpu) return NULL;
+    pc24 &= 0xFFFFFFu;
+    const DispatchEntry *row = _table_find(table, count, pc24);
+    if (!row && dispatch_has_rom_mirror(pc24))
+        row = _table_find(table, count, pc24 ^ 0x800000u);
+    if (!row) return NULL;
+    return row->variant[((cpu->m_flag & 1) << 1) | (cpu->x_flag & 1)];
+}
+
 const char *cpu_dispatch_entry_reason(uint32_t pc24, uint8_t mx) {
     const DispatchEntry *row = _cpu_dispatch_find(pc24);
     if (!row) {

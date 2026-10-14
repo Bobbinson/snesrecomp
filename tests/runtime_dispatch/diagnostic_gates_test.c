@@ -183,6 +183,112 @@ static int generated_entry_s_frames_still_resolve_returns(void) {
   return failures;
 }
 
+/* Kept compiled original (cfg `hle_keep_original`, docs/HLE_FUNC.md): the
+ * helper's cpu_hle_call_original() must enter the original body exactly as a
+ * plain build's caller entered it directly, although the forwarding stub's
+ * host frame now sits in between and returns the body's value verbatim. */
+static uint16_t s_orig_probe_ret_s;
+static uint16_t s_orig_entry_s;
+static uint8_t s_orig_hrv;
+static int s_orig_adopted;
+static int s_orig_skip;
+
+/* What a generated prologue does, then a return-to-ancestor probe from its
+ * RTS (cpu_resolve_ancestor_skip with the popped frame's S). */
+static RecompReturn mock_kept_original(CpuState *cpu) {
+  RecompStackPush("mock_kept_original");
+  uint16_t entry_s = cpu->S;
+  uint8_t hrv = cpu->host_return_valid;
+  s_orig_adopted = cpu_take_tailcall_return_context(&entry_s, &hrv);
+  s_orig_entry_s = entry_s;
+  s_orig_hrv = hrv;
+  g_cpu_entry_s[g_recomp_stack_top - 1] = entry_s;
+  s_orig_skip = cpu_resolve_ancestor_skip(s_orig_probe_ret_s);
+  RecompStackPop();
+  return RECOMP_RETURN_NORMAL;
+}
+
+/* Plain build, call arrival: [ancestor $1F0][caller $1E0][body $1DE]; an RTS
+ * of the body back to the ancestor's level resolves to SKIP_2 (body and caller
+ * each decrement once). Plain build, tail arrival: [ancestor][jumper $1E0]
+ * [body, tail-entered with the jumper's baseline]: SKIP_1. The kept original
+ * must resolve the same through the stub. */
+static int hle_kept_original_enters_like_a_direct_callee(void) {
+  int failures = 0;
+
+  /* -- call arrival (JSR onto the replaced PC) -- */
+  g_recomp_stack_top = 0;
+  g_cpu.host_return_valid = 2;
+  g_cpu.S = 0x01f0;
+  RecompStackPush("ancestor");
+  g_cpu_entry_s[g_recomp_stack_top - 1] = 0x01f0;
+  g_cpu.S = 0x01e0;
+  RecompStackPush("caller");
+  g_cpu_entry_s[g_recomp_stack_top - 1] = 0x01e0;
+  g_cpu.S = 0x01de;                       /* the caller's JSR frame */
+  g_cpu.host_return_valid = 2;
+  RecompStackPush("kept_stub_M1X0");      /* forwarding stub */
+  cpu_hle_take_arrival_context();
+  s_orig_probe_ret_s = 0x01f0;
+  RecompReturn r = cpu_hle_call_original(&g_cpu, mock_kept_original);
+  failures += check(r == RECOMP_RETURN_NORMAL, "kept original returns its own value");
+  failures += check(s_orig_adopted == 1, "call arrival: body adopts the stub's arrival");
+  failures += check(s_orig_entry_s == 0x01de && s_orig_hrv == 2,
+                    "call arrival: body records the caller's frame (entry S, JSR hrv)");
+  failures += check(s_orig_skip == 2,
+                    "call arrival: return-to-ancestor depth as without the stub (SKIP_2)");
+  failures += check(cpu_take_tailcall_return_context(NULL, NULL) == 0,
+                    "call arrival: no tail-call context left armed");
+  RecompStackPop();
+  RecompStackPop();
+  RecompStackPop();
+
+  /* -- tail arrival (JMP onto the replaced PC; the jumper pushed 2 bytes) -- */
+  g_recomp_stack_top = 0;
+  g_cpu.host_return_valid = 2;
+  g_cpu.S = 0x01f0;
+  RecompStackPush("ancestor");
+  g_cpu_entry_s[g_recomp_stack_top - 1] = 0x01f0;
+  g_cpu.S = 0x01e0;
+  RecompStackPush("jumper");
+  g_cpu_entry_s[g_recomp_stack_top - 1] = 0x01e0;
+  g_cpu.S = 0x01de;                       /* unbalanced at the JMP */
+  cpu_tailcall_inherit_return_context(0x01e0, 2);
+  RecompStackPush("kept_stub_M1X0");
+  cpu_hle_take_arrival_context();
+  failures += check(cpu_take_tailcall_return_context(NULL, NULL) == 0,
+                    "tail arrival: the stub swallows the context");
+  r = cpu_hle_call_original(&g_cpu, mock_kept_original);
+  failures += check(s_orig_adopted == 1 && s_orig_entry_s == 0x01e0 && s_orig_hrv == 2,
+                    "tail arrival: body inherits the jumper's baseline and hrv");
+  failures += check(s_orig_skip == 1,
+                    "tail arrival: return-to-ancestor depth as without the stub (SKIP_1)");
+  RecompStackPop();
+  RecompStackPop();
+  RecompStackPop();
+
+  /* -- a later frame in the same slot does not inherit a stale arrival -- */
+  g_recomp_stack_top = 0;
+  g_cpu.host_return_valid = 3;
+  g_cpu.S = 0x01f0;
+  RecompStackPush("ancestor");
+  g_cpu_entry_s[g_recomp_stack_top - 1] = 0x01f0;
+  g_cpu.S = 0x01e0;
+  RecompStackPush("caller");
+  g_cpu_entry_s[g_recomp_stack_top - 1] = 0x01e0;
+  g_cpu.S = 0x01dd;                       /* a JSL frame */
+  RecompStackPush("other_stub_M1X0");     /* no arrival recorded */
+  cpu_take_tailcall_return_context(NULL, NULL);
+  r = cpu_hle_call_original(&g_cpu, mock_kept_original);
+  failures += check(s_orig_entry_s == 0x01dd && s_orig_hrv == 3,
+                    "unrecorded stub frame: body takes the live S and hrv");
+  RecompStackPop();
+  RecompStackPop();
+  RecompStackPop();
+  g_cpu.host_return_valid = 0;
+  return failures;
+}
+
 static int json_matches_stack_balance_mode(void) {
   FILE *f = tmpfile();
   char buf[256];
@@ -226,6 +332,7 @@ int main(void) {
   failures += check(json_matches_stack_balance_mode(),
                     "stack-balance dump matches diagnostic mode");
   failures += interpreter_scope_does_not_resolve_returns();
+  failures += hle_kept_original_enters_like_a_direct_callee();
 
   g_recomp_snap_on_func = "diagnostic_gates_test";
   g_recomp_snap_count = 7;

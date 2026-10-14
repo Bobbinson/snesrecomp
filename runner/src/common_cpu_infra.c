@@ -198,6 +198,58 @@ void cpu_tailcall_context_restore(const CpuTailcallContextSave *in) {
   g_tailcall_hrv = in->hrv;
 }
 
+/* ── Kept compiled originals (cfg `hle_keep_original`, docs/HLE_FUNC.md) ──
+ *
+ * In a plain build a replaced routine's compiled body is entered directly by
+ * its caller. With an hle_func the caller enters the forwarding stub, and the
+ * helper may delegate to the kept original: one more host frame in between,
+ * which returns the body's value verbatim. cpu_hle_call_original() makes the
+ * body see what it would have seen as the direct callee:
+ *   - its prologue adopts, as a tail-call context, the stub's arrival: the
+ *     context the stub swallowed for a JMP/JML arrival (recorded below), else
+ *     the live S and host_return_valid, which the stub and the gate leave as
+ *     the caller set them. Same _entry_s, same _hrv, same host-return check
+ *     at the original's RTS/RTL;
+ *   - the body's slot is marked tail-entered by that adoption, so
+ *     cpu_resolve_unwind_depth() does not count the extra frame: the stub
+ *     (a call arrival) is the frame that decrements, as the body was;
+ *   - for a tail arrival the stub's own slot is also marked tail-entered and
+ *     takes the inherited baseline, as the plain build's body slot did (the
+ *     jumping function returns the stub's value verbatim).
+ * The stub's slot stays excluded from ancestor scans (the swallow does that). */
+static const char *g_hle_arrival_owner[RECOMP_STACK_DEPTH];
+static uint16_t g_hle_arrival_tail_s[RECOMP_STACK_DEPTH];
+static uint8_t g_hle_arrival_tail_hrv[RECOMP_STACK_DEPTH];
+
+void cpu_hle_take_arrival_context(void) {
+  const int slot = g_recomp_stack_top - 1;
+  const int tail = g_tailcall_context_valid != 0;
+  const uint16_t tail_s = g_tailcall_entry_s;
+  const uint8_t tail_hrv = g_tailcall_hrv;
+  cpu_take_tailcall_return_context(NULL, NULL);   /* the stub's usual swallow */
+  if (slot < 0 || slot >= RECOMP_STACK_DEPTH) return;
+  /* Valid only for the host frame that recorded it: a later frame in the
+   * same slot has another (interned) name. */
+  g_hle_arrival_owner[slot] = tail ? g_recomp_stack[slot] : NULL;
+  g_hle_arrival_tail_s[slot] = tail_s;
+  g_hle_arrival_tail_hrv[slot] = tail_hrv;
+}
+
+RecompReturn cpu_hle_call_original(CpuState *cpu, RecompBodyFn body) {
+  const int slot = g_recomp_stack_top - 1;
+  uint16_t entry_s = cpu->S;
+  uint8_t hrv = cpu->host_return_valid;
+  if (slot >= 0 && slot < RECOMP_STACK_DEPTH && g_hle_arrival_owner[slot] &&
+      g_hle_arrival_owner[slot] == g_recomp_stack[slot]) {
+    entry_s = g_hle_arrival_tail_s[slot];
+    hrv = g_hle_arrival_tail_hrv[slot];
+    g_cpu_entry_tailcall[slot] = 1;
+    g_cpu_entry_s[slot] = entry_s;
+  }
+  cpu_tailcall_inherit_return_context(entry_s, hrv);
+  return body(cpu);
+}
+
 /* ── Unresolved-site balanced abandon + ALWAYS-ON hit accounting ──────
  * Correctness layer (compiled in every configuration, unlike the
  * cpu_trace_* slot table which no-ops at SNESRECOMP_TRACE=0). Every

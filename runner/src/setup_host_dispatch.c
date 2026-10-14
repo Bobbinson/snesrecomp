@@ -2,8 +2,9 @@
  *
  * The runner links against g_dispatch_table / g_ram_routine_guards, which the
  * recompiler normally emits into src/gen/dispatch_v2.c. A setup host has no
- * src/gen -- that is its definition -- so this file provides the two symbols
- * with nothing in them.
+ * src/gen -- that is its definition -- so this file provides those symbols
+ * with nothing in them, and the (empty) kept-originals table a port's
+ * hle_func helpers may read (generated hle_original_v2.c).
  *
  * This is NOT a stub in the sense recomp-ai-rules forbids: no guest code is
  * ever executed against these tables. SnesInit() refuses to boot a guest at
@@ -37,3 +38,11 @@ const RamRoutineGuard g_ram_routine_guards[] = {
 };
 const unsigned g_ram_routine_guard_count =
     (unsigned)(sizeof(g_ram_routine_guards) / sizeof(g_ram_routine_guards[0]));
+
+/* The runner never reads the kept-originals table (cfg `hle_keep_original`,
+ * generated hle_original_v2.c), but a port's hle_func helpers may: give them
+ * the same empty table the emitter writes for a cfg that keeps none. */
+const DispatchEntry g_hle_original_table[] = {
+    { 0xFFFFFFu, { NULL, NULL, NULL, NULL }, 0 },
+};
+const unsigned g_hle_original_table_count = 0u;

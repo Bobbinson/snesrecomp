@@ -593,6 +593,48 @@ typedef struct RamRoutineGuard {
 extern const RamRoutineGuard g_ram_routine_guards[];
 extern const unsigned        g_ram_routine_guard_count;
 
+/* ── Kept compiled originals (cfg `hle_keep_original`) ────────────────────
+ *
+ * docs/HLE_FUNC.md, "Keeping the compiled original". For an hle_func PC that
+ * the cfg also lists in `hle_keep_original`, the emitter emits the routine's
+ * compiled original body as `<Name>_orig_M<m>X<x>` (the body a plain build
+ * dispatches to, frame-deadline checks and yields included) and lists it in
+ * the generated hle_original_v2.c. These bodies own no dispatch slot: the
+ * forwarding stub keeps the PC, and the helper delegates through
+ * cpu_hle_call_original().
+ *
+ * The table is DECLARED here for the port's helpers only. The runner itself
+ * never references it, so hosts and tests that link no generated tree keep
+ * linking. Rows are sorted by pc24; a NULL slot means the analysis compiled
+ * no body for that exact M/X (a plain build interprets it). */
+typedef RecompReturn (*RecompBodyFn)(CpuState *cpu);
+extern const DispatchEntry g_hle_original_table[];
+extern const unsigned      g_hle_original_table_count;
+
+/* Exact live-M/X body of `pc24` in a DispatchEntry table sorted by pc24
+ * (g_hle_original_table, for instance), or NULL: no row, or no body for the
+ * current M/X. Pure lookup. */
+RecompBodyFn cpu_dispatch_table_body(const DispatchEntry *table, unsigned count,
+                                     uint32 pc24, const CpuState *cpu);
+
+/* Emitted in the forwarding stub of an hle_func that keeps its original,
+ * right after its RecompStackPush, in place of
+ * cpu_take_tailcall_return_context(NULL, NULL): the same swallow of a pending
+ * tail-call context, but a tail arrival (JMP/JML onto the PC) is remembered
+ * for this host frame. */
+void cpu_hle_take_arrival_context(void);
+
+/* From the helper of an hle_func that keeps its original (or any helper whose
+ * stub frame is the innermost host frame): run the compiled original `body`
+ * exactly as the plain build's caller would have entered it. The body's
+ * prologue adopts the stub's arrival -- the tail-call context the stub
+ * swallowed, else the live S and host_return_valid -- and is recorded as a
+ * tail-entered frame (the stub returns its value verbatim), so SKIP_N depths,
+ * return-to-ancestor scans and LLE yields resolve as without the stub. The
+ * return frame stays on the guest stack: the original's own RTS/RTL pops it.
+ * Returns the body's value unchanged. */
+RecompReturn cpu_hle_call_original(CpuState *cpu, RecompBodyFn body);
+
 /* Select a statically linked program before entering guest execution. Tables
  * must remain alive for the entire session and be sorted by pc24. Direct calls
  * must belong to the same module; this API does not rewrite compiled calls.
