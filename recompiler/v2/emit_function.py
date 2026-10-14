@@ -465,6 +465,7 @@ def emit_function(rom: bytes, bank: int, start: int,
                   hle_spc_upload=None,
                   hle_func=None,
                   hle_dispatch=None,
+                  hle_keep_original=None,
                   inline_arg_map=None,
                   terminal_jsr_sites=None,
                   noreturn_jsr_sites=None,
@@ -564,13 +565,21 @@ def emit_function(rom: bytes, bank: int, start: int,
         c_helper = hle_func[start & 0xFFFF]
         variant_name = f"{base_func_name}{_variant_suffix(entry_m, entry_x)}"
         pc24 = ((bank & 0xFF) << 16) | (start & 0xFFFF)
+        # A routine that keeps its compiled original (`hle_keep_original`)
+        # records how this stub was entered, so the helper can enter the
+        # original exactly as the stub was (cpu_hle_call_original). Same
+        # swallow of a pending tail-call context either way.
+        keeps_original = bool(hle_keep_original and
+                              (start & 0xFFFF) in hle_keep_original)
+        take_context = ("  cpu_hle_take_arrival_context();" if keeps_original
+                        else "  cpu_take_tailcall_return_context(NULL, NULL);")
         return "\n".join([
             f"RecompReturn {variant_name}(CpuState *cpu) {{",
             "  extern const char *g_last_recomp_func;",
             f"  extern RecompReturn {c_helper}(CpuState *cpu);",
             f"  g_last_recomp_func = \"{variant_name}\";",
             f"  RecompStackPush(\"{variant_name}\");",
-            "  cpu_take_tailcall_return_context(NULL, NULL);",
+            take_context,
             f"  cpu_dbg_funcname(\"{variant_name}\");",
             f"  cpu_trace_func_entry(cpu, 0x{pc24:06X}, \"{variant_name}\");",
             f"  cpu_trace_block(cpu, 0x{pc24:06X});",

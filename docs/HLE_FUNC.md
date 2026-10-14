@@ -64,6 +64,12 @@ The stub does **not** pop the return frame, charge cycles, check the LLE
 scheduler deadline, or change any register. Those are the helper's
 responsibility.
 
+The stub of a routine that also keeps its compiled original
+(`hle_keep_original`, see [Keeping the compiled original](#keeping-the-compiled-original))
+calls `cpu_hle_take_arrival_context()` in place of
+`cpu_take_tailcall_return_context(NULL, NULL)`: the same swallow of a pending
+tail-call context, plus a record of how the stub was entered.
+
 The PC is a hard decode boundary in both the native analyzer and the Python
 emitter. Its ROM bytes are never compiled into another function's body, and
 every edge onto it is a tail transfer to the stub. The analyzer still decodes
@@ -195,9 +201,16 @@ presentation that the guest never reads.
 
 ## Delegating to the original
 
-A replacement covers all four variants, so no compiled original body exists to
-call. There are two ways to run original behaviour from a helper:
+A replacement covers all four variants, so by default no compiled original
+body exists to call. There are three ways to run original behaviour from a
+helper:
 
+- **The whole routine, as a plain build compiled it:** declare
+  `hle_keep_original` for the PC and call the kept body with
+  `cpu_hle_call_original` (see
+  [Keeping the compiled original](#keeping-the-compiled-original)). Same code,
+  same cycle charges, same frame-deadline checks and yields as a build
+  without the replacement.
 - **The whole routine, exactly:** run the ROM bytes in the interpreter. Nested
   calls still bounce into compiled code. The interpreter consumes the caller's
   frame and charges its own cycles.
@@ -224,6 +237,98 @@ call. There are two ways to run original behaviour from a helper:
 Partial delegation, where the replacement runs into the middle of the
 compiled original, is not supported. To get it, split the original with a
 second `func` boundary at the resume PC and delegate to that entry.
+
+## Keeping the compiled original
+
+Interpreting the original is exact in guest state but not in timing: the
+interpreter charges every bus access at its region's speed, while compiled
+code charges each block a constant at the code region's speed, and only
+compiled code checks the LLE scheduler's frame deadline at block heads (and
+yields to the interpreter there). A helper that falls back to the
+interpreter therefore runs the routine on a different master-cycle schedule
+than a build without the replacement: frames that run late (lag frames) see
+the NMI at another instruction, and recorded inputs replay differently. When
+the routine was compiled before it was replaced, keep its compiled body:
+
+```
+# bank cfg
+hle_func A944 HleShiftGlyph
+hle_keep_original A944            # one or more PCs, each with an hle_func
+```
+
+`hle_keep_original` is a directive of its own (not a third token on the
+`hle_func` line): the native analyzer ignores it, so no analyzer change is
+involved. Every PC it names must have an `hle_func` in the same cfg; the cfg
+loader rejects one that does not.
+
+**What is emitted.** For every M/X variant of the PC that the analysis marks
+`aot_eligible` (exactly the bodies a plain build would dispatch to), the
+emitter also emits the routine's body from the ROM bytes, as a build without
+the `hle_func` would, under `<Name>_orig_M<m>X<x>` (`bank_BB_AAAA_orig_…`
+without a cfg name). Inside it a back-edge to its own entry stays a local
+`goto`; every other `hle_func` PC stays a boundary, so its calls reach their
+stubs. These bodies:
+
+- own no dispatch slot: callers, the dispatch row and runtime lookups keep
+  reaching the forwarding stub, so the helper still decides;
+- get no host `void` alias;
+- are listed in `g_hle_original_table` (generated `hle_original_v2.c`, always
+  emitted, empty when nothing is kept): `DispatchEntry` rows sorted by pc24,
+  one slot per M/X, NULL where the analysis compiled nothing (a plain build
+  interprets that variant). `cpu_state.h` declares the table; the runner never
+  references it, so hosts and tests linking no generated tree are unaffected
+  (`setup_host_dispatch.c` defines an empty one). In a prefixed program module
+  the two symbols are renamed like `g_dispatch_table`.
+
+**Calling it.** From the helper:
+
+```c
+RecompReturn HleShiftGlyph(CpuState *cpu) {
+  if (!use_the_c_version(cpu)) {
+    RecompBodyFn body = cpu_dispatch_table_body(
+        g_hle_original_table, g_hle_original_table_count, 0xFEA944, cpu);
+    if (body) return cpu_hle_call_original(cpu, body);   /* as compiled */
+    return interp_tier_run_call_frame(cpu, 0xFEA944, 0xFEA944, 2, NULL);
+  }
+  ...
+}
+```
+
+`cpu_dispatch_table_body` is the dispatch binary search for the live M/X,
+with the LoROM execution-mirror fallback. `cpu_hle_call_original` enters the
+body exactly as a plain build's caller entered it directly, although the
+stub's host frame sits in between:
+
+- the body's prologue adopts the stub's arrival as a tail-call context: for a
+  call arrival the live S and `host_return_valid` (the caller's JSR/JSL frame
+  is on the stack, as the helper contract says), for a JMP/JML arrival the
+  context the stub swallowed (recorded by `cpu_hle_take_arrival_context`).
+  Same `_entry_s`, same `_hrv`, same host-return check at the original's own
+  RTS/RTL, which pops the return frame;
+- adopting it marks the body's host frame as tail-entered: the stub returns
+  the body's value verbatim, so `SKIP_N` depths, return-to-ancestor scans and
+  LLE yield unwinds resolve as without the stub. For a tail arrival the stub's
+  frame is marked tail-entered too, with the inherited baseline;
+- the body checks the frame deadline in its prologue and at each block head,
+  and yields (`interp_bridge_lle_yield_unwind`) exactly where the plain build
+  did; the helper returns that value unchanged.
+
+The helper must call it before changing S or `host_return_valid` (first
+thing, or after pure inspection), from the stub's own host frame.
+
+Compiled code keeps `P` in its `_flag_*` mirrors and does not rewrite the `P`
+byte after every flag change; the plain build has the same property, so a
+harness that compares `P` against the mirrors after the routine sees the
+same stale byte with or without the replacement.
+
+**Cost.** The kept bodies are the bodies a plain build compiles, so the
+generated tree only grows by them, plus one table row per kept PC.
+
+`tests/v2/test_hle_keep_original.py` pins the emitter side (body under its
+own name with a local back-edge, stub ownership, the table, the cfg check,
+`--no-hle`); `tests/runtime_dispatch/diagnostic_gates_test.c` pins the entry
+contract of `cpu_hle_call_original` (call and tail arrivals, return-to-ancestor
+depths, no stale arrival).
 
 ## Host continuation hooks
 

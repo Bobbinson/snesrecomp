@@ -200,6 +200,17 @@ class BankCfg:
     # declares another exit. Map: pc16 -> c_function_name. Full contract:
     # docs/HLE_FUNC.md.
     hle_func: dict = field(default_factory=dict)
+    # `hle_keep_original <pc16> [<pc16> ...]` — an hle_func PC whose compiled
+    # original body is ALSO emitted, as `<Name>_orig_M{m}X{x}` for every M/X
+    # variant the analysis compiles. Those bodies are not dispatch rows (the
+    # stub keeps the PC); they are listed in `g_hle_original_table` so the
+    # helper can delegate to the code a plain build would have run, frame
+    # deadline checks and yields included. A separate directive (not a 4th
+    # token on the hle_func line) so the native analyzer's cfg parser, which
+    # ignores unknown directives, needs no change. Every PC must also have an
+    # hle_func in the same cfg. docs/HLE_FUNC.md, "Keeping the compiled
+    # original".
+    hle_keep_original: set = field(default_factory=set)
     # `hle_dispatch <site_pc16> <c_function_name>` — at the named indirect
     # JMP/JML/JSR site, replace the unresolved-dispatch trap with a
     # tail-call to the named C helper. Used when the asm dispatcher at
@@ -408,6 +419,21 @@ def load_bank_cfg(path: str) -> BankCfg:
                         f"{path}: hle_func c_function_name must be a valid "
                         f"C identifier, got: {c_name!r}")
                 cfg.hle_func[pc16] = c_name
+                continue
+
+            # hle_keep_original <pc16> [<pc16> ...] — also emit the compiled
+            # original body of these hle_func PCs (see BankCfg).
+            if head == 'hle_keep_original':
+                if len(tokens) < 2:
+                    raise ValueError(
+                        f"{path}: hle_keep_original needs <pc> [<pc> ...], "
+                        f"got: {stripped!r}")
+                for token in tokens[1:]:
+                    try:
+                        cfg.hle_keep_original.add(_parse_hex(token) & 0xFFFF)
+                    except ValueError as e:
+                        raise ValueError(
+                            f"{path}: hle_keep_original bad pc {token!r}: {e}")
                 continue
 
             # force_lle <pc24> — retain this executable function boundary on
@@ -919,6 +945,12 @@ def load_bank_cfg(path: str) -> BankCfg:
 
     if cfg.bank < 0:
         raise ValueError(f"{path}: missing 'bank = NN' line")
+
+    orphan_originals = sorted(cfg.hle_keep_original - set(cfg.hle_func))
+    if orphan_originals:
+        raise ValueError(
+            f"{path}: hle_keep_original without an hle_func at the same PC: "
+            + ", ".join(f"${pc:04X}" for pc in orphan_originals))
 
     # Route inline contracts through the same consumed table as standalone
     # exits. Explicit standalone entries retain override precedence.

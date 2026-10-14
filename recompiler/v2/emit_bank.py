@@ -70,6 +70,12 @@ class BankEntry:
     # (_hrv && _ret_s == _entry_s) fires correctly.  Default 0 (no
     # adjustment).  Set via cfg `entry_s_offset:<n>` on a func line.
     entry_s_offset: int = 0
+    # hle_original: this entry is the compiled ORIGINAL body of an hle_func
+    # PC kept by `hle_keep_original` (name `<Name>_orig`). It is emitted from
+    # the ROM bytes as if the PC had no hle_func (back-edges to its own entry
+    # stay local), gets no void alias and never claims the PC's name: the
+    # forwarding stub keeps the PC's dispatch row.
+    hle_original: bool = False
 
 
 def emit_bank(rom: bytes, bank: int,
@@ -92,6 +98,7 @@ def emit_bank(rom: bytes, bank: int,
               hle_spc_upload=None,
               hle_func=None,
               hle_dispatch=None,
+              hle_keep_original=None,
               inline_arg_map=None,
               declared_entry_pcs=None,
               host_alias_entries=None) -> str:
@@ -128,6 +135,8 @@ def emit_bank(rom: bytes, bank: int,
     # call time so the suffix matches the boundary's (m, x).
     by_start: dict = {}
     for e in entries:
+        if e.hle_original:
+            continue      # the stub, not the kept original, owns the PC
         b = e.name or _default_func_name_local(bank, e.start)
         by_start[e.start & 0xFFFF] = b
 
@@ -191,6 +200,16 @@ def emit_bank(rom: bytes, bank: int,
                 pc for pc in sibling_pcs
                 if not _inside_entry_range(pc)
             }
+        entry_hle_func = hle_func
+        if entry.hle_original:
+            # The original body of a replaced routine: decode and emit it as
+            # a plain build would (`--no-hle` for this PC only). Every OTHER
+            # hle_func PC stays a boundary, so its callees still reach their
+            # stubs.
+            entry_hle_func = {
+                pc: name for pc, name in (hle_func or {}).items()
+                if (pc & 0xFFFF) != (entry.start & 0xFFFF)
+            }
         src = emit_function(
             rom=rom,
             bank=bank,
@@ -218,8 +237,9 @@ def emit_bank(rom: bytes, bank: int,
             callee_exit_mx_modes=callee_exit_mx_modes,
             sibling_entry_pcs=sibling_pcs,
             hle_spc_upload=hle_spc_upload,
-            hle_func=hle_func,
+            hle_func=entry_hle_func,
             hle_dispatch=hle_dispatch,
+            hle_keep_original=hle_keep_original,
             inline_arg_map=inline_arg_map,
         )
         parts.append(src)
@@ -237,7 +257,7 @@ def emit_bank(rom: bytes, bank: int,
     # worth crashing on.
     alias_entries = {}
     for entry in entries:
-        if entry.name:
+        if entry.name and not entry.hle_original:
             spec = alias_entries.setdefault(entry.name, {
                 "pc24": ((bank & 0xFF) << 16) | (entry.start & 0xFFFF),
                 "modes": set(),
