@@ -90,6 +90,7 @@ enum {
     INTERP_RESUME_SITE_STEP_CAP,        /* step-cap bail                      */
     INTERP_RESUME_SITE_EXTERNAL,        /* interp_bridge_set_lle_resume_pc    */
     INTERP_RESUME_SITE_ROLLBACK,        /* rollback state load                */
+    INTERP_RESUME_SITE_STEP_CAP_HANDOFF, /* nested frame at the cap, suspended */
     INTERP_RESUME_SITE_COUNT
 };
 enum {

@@ -736,6 +736,7 @@ static const char *const k_resume_site_names[INTERP_RESUME_SITE_COUNT] = {
     [INTERP_RESUME_SITE_STEP_CAP]        = "step_cap",
     [INTERP_RESUME_SITE_EXTERNAL]        = "external",
     [INTERP_RESUME_SITE_ROLLBACK]        = "rollback",
+    [INTERP_RESUME_SITE_STEP_CAP_HANDOFF] = "step_cap_handoff",
 };
 static const char *const k_resume_kind_names[] = {
     "set", "unwind_arm", "unwind_consume", "restore",
@@ -3044,6 +3045,51 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
         itrace_dump(entry_pc24, head, (int)(itn < 8 ? itn : 8), ring, itn);
         interp_bridge_dump_recent_edges(64, stderr);
         interp_bridge_dump_resume_ring(32, stderr);
+    }
+    /* A NESTED frame (yield_pc == 0) under an LLE scheduler that hits the cap
+     * is suspended, not abandoned. The bail below hands the caller the
+     * mid-loop CPU state (registers, M/X, D, DB) as if the routine had
+     * returned: the compiled caller then runs its continuation with widths
+     * the routine never returns with, and the guest derails. Romancing SaGa 3
+     * (PLAYTEST #15): event handler $C0:B2D4 snaps an object to the 8 px grid
+     * by adding its step until (y & 7) == 0; with y = 2 mod 4 and a step of
+     * +-4 the ROM loops forever (snes9x agrees: the game freezes, the NMI keeps
+     * running). The nested frame running it ($C0:B013, interpreted, called by
+     * compiled $C0:06AA) bailed with M=0 into $C0:06AD, which entered
+     * $C0:5188 -> $C0:71F6 at 16-bit A: LDA #$FF swallowed the LDX opcode and
+     * the next byte was a BRK, then a wild stack.
+     *
+     * Hand the loop outward instead, through the same unwind the cooperative
+     * hand-offs above use: arm it at the cap PC for the next frame out, with
+     * the guest stack and registers intact. The frame that owns it resumes
+     * interpreting there; the scheduler frame bounds it by the master deadline
+     * and the frame driver delivers the NMI between frames, as the hardware
+     * does. A loop that ends after an interrupt now ends; one that never ends
+     * stalls like the ROM instead of corrupting state. Interrupt handlers
+     * (stop_on_rti), a frame outside any scheduler and a host bail request
+     * keep the bail. SNESRECOMP_STEP_CAP_BAIL=1 restores it everywhere. */
+    {
+        static int s_cap_bail = -1;
+        if (s_cap_bail < 0) {
+            const char *_e = getenv("SNESRECOMP_STEP_CAP_BAIL");
+            s_cap_bail = (_e && _e[0] && _e[0] != '0') ? 1 : 0;
+        }
+        if (!s_cap_bail && !bail_requested && !stop_on_rti && !yield_pc &&
+            s_lle_sched_depth > 0 && s_interp_bridge_depth > 1) {
+            const uint32_t cap_pc = ((uint32_t)in.k << 16) | in.pc;
+            static int s_handoff_reports;
+            if (s_handoff_reports < 32) {
+                s_handoff_reports++;
+                fprintf(stderr, "[interp_cap] nested frame suspended at $%06X, "
+                        "handed outward (owner depth %d)\n",
+                        (unsigned)cap_pc, s_interp_bridge_depth - 1);
+            }
+            lle_unwind_arm(cap_pc, s_interp_bridge_depth - 1, 0,
+                           INTERP_RESUME_SITE_STEP_CAP_HANDOFF, in.sp);
+            sync_interp_to_cpu(&in, cpu);
+            bridge_apu_flush(cpu);
+            return 1;
+        }
     }
     /* Save the current PC so the frame driver can resume from where the
      * interpreter left off, rather than restarting at the RESET vector.

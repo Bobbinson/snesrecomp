@@ -43,6 +43,8 @@ static int      g_aot_deadline_unwind;
 static int      g_aot_nested_deadline;
 static int      g_after_nested_deadline;
 static int      g_aot_gap_walks_into_wait;
+static int      g_aot_calls_endless_gap;
+static int      g_after_endless_gap;
 static int      g_owner_target_result;
 static int      g_aot_tail_chain_probe;
 static int      g_aot_skips_root;
@@ -209,6 +211,25 @@ RecompReturn cpu_dispatch_pc(CpuState *cpu, uint32 pc24, uint16 miss_restore) {
 RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc24,
                                     uint8 frame_size) {
     cpu->host_return_valid = frame_size;
+    if (g_aot_calls_endless_gap && (pc24 & 0xFFFFFF) == FAKE_AOT) {
+        /* Compiled root JSRs an untranslated routine ($8300) that loops until
+         * an interrupt changes $30. Its guest continuation is ROM at $8110;
+         * the C after the call is the compiled continuation, which must run
+         * only if the routine really returned. */
+        g_aot_called++;
+        g_recomp_stack_top++;
+        g_cpu_entry_s[g_recomp_stack_top - 1] = cpu->S;
+        cpu_write8(cpu, 0, cpu->S, 0x81); cpu->S--;
+        cpu_write8(cpu, 0, cpu->S, 0x0F); cpu->S--;   /* JSR, returns to $8110 */
+        RecompReturn r = interp_tier_run_call_frame(cpu, 0x008300, 0x00810D,
+                                                    2, NULL);
+        g_recomp_stack_top--;
+        if (r != RECOMP_RETURN_NORMAL) return r;
+        ++g_after_endless_gap;
+        cpu->A = 0xdead;
+        cpu->S = (uint16)(cpu->S + frame_size);       /* the root's RTL */
+        return RECOMP_RETURN_NORMAL;
+    }
     if (g_aot_nested_deadline && pc24 == FAKE_AOT) {
         RecompReturn result = interp_tier_dispatch_balanced(
             cpu, 0x008300, FAKE_AOT, cpu->S, frame_size, false);
@@ -916,6 +937,57 @@ int main(void) {
             "nested AOT body must not be re-entered or abandoned");
       g_aot_gap_walks_into_wait = 0;
     }
+
+    /* S8h: a nested frame that reaches the step cap in a loop only an
+     * interrupt can end (it writes memory, so no stable-poll detector sees
+     * it) is suspended and handed outward, not abandoned. The bail used to
+     * return the mid-loop registers and widths to the compiled caller as if
+     * the routine had returned (Romancing SaGa 3, PLAYTEST #15: M=0 into a
+     * caller compiled for M=1, then a BRK and a wild stack). The owner keeps
+     * the guest stack, the compiled continuation never runs, and once the
+     * awaited value changes the real RTS and its caller run exactly once. */
+    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0; g_abandon_called = 0;
+      g_after_endless_gap = 0; g_aot_calls_endless_gap = 1;
+      uint8_t scheduler[] = {
+          0x22,0x00,0x81,0x00,                 /* $8000: JSL fake compiled root */
+          0xA9,0x5A,                           /* $8004: LDA #$5A */
+          0xAD,0x20,0x00, 0xD0,0xFB            /* $8006: cooperative wait loop */
+      };
+      uint8_t continuation[] = {
+          0xA9,0x77, 0x85,0x22, 0x6B           /* $8110: LDA #$77; STA $22; RTL */
+      };
+      uint8_t endless[] = {
+          0xE6,0x31,                           /* $8300: INC $31 */
+          0xA5,0x30,                           /* $8302: LDA $30 */
+          0xF0,0xFA,                           /* $8304: BEQ $8300 */
+          0x60                                 /* $8306: RTS */
+      };
+      load(0x8000, scheduler, sizeof scheduler);
+      load(0x8110, continuation, sizeof continuation);
+      load(0x8300, endless, sizeof endless);
+      RAM[0x20] = 0; RAM[0x30] = 0;
+      (void)interp_bridge_run_loop(&g_c, 0x008000, 0x008006, 0x0020, 0);
+      const uint32_t resume = interp_bridge_lle_resume_pc();
+      printf("S8h nested frame at the step cap is suspended, not abandoned\n");
+      CHECK(g_aot_called == 1 && g_abandon_called == 0 && g_after_endless_gap == 0,
+            "aot=%d abandon=%d after=%d exp 1/0/0 (no compiled continuation)",
+            g_aot_called, g_abandon_called, g_after_endless_gap);
+      CHECK(resume >= 0x008300 && resume <= 0x008304,
+            "resume=$%06X exp inside the loop $8300-$8304", (unsigned)resume);
+      CHECK(g_c.S == 0x01FA, "S=%04X exp 01FA (JSL and JSR frames retained)",
+            g_c.S);
+      CHECK(RAM[0x22] == 0 && (g_c.A & 0xFF) != 0x5A,
+            "no continuation ran: $22=%02X A=%04X", RAM[0x22], g_c.A);
+      CHECK(!interp_bridge_lle_unwind_pending(), "unwind consumed by its owner");
+      RAM[0x30] = 1;                           /* the awaited interrupt */
+      int rc = interp_bridge_run_loop(&g_c, resume, 0x008006, 0x0020, 0);
+      CHECK(rc == 1 && g_c.S == 0x01FF && RAM[0x22] == 0x77 &&
+            (g_c.A & 0xFF) == 0x5A,
+            "resumed RTS and caller run once: rc=%d S=%04X $22=%02X A=%04X",
+            rc, g_c.S, RAM[0x22], g_c.A);
+      CHECK(g_aot_called == 1 && g_after_endless_gap == 0,
+            "compiled root neither re-entered nor continued");
+      g_aot_calls_endless_gap = 0; }
 
     /* S8b: an AOT root reached from the LLE scheduler can non-locally return
      * through its own compiled host frame while still landing normally in the
